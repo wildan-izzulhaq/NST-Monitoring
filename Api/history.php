@@ -1,13 +1,4 @@
 <?php
-// ================================================================
-//  history.php — Revisi 2: Filter berdasarkan session
-//
-//  Hanya tampilkan data yang punya session_id (direkam lewat START)
-//  Data live tanpa session tidak masuk riwayat
-//
-//  GET ?patient_id=1  → riwayat sesi pasien tertentu
-//  GET                → semua riwayat
-// ================================================================
 
 header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json");
@@ -17,14 +8,11 @@ require_once "config.php";
 
 $patient_id = isset($_GET['patient_id']) ? intval($_GET['patient_id']) : 0;
 
-// Cek kolom session_id sudah ada (tidak pakai IF NOT EXISTS karena tidak didukung semua MySQL)
 $chk = $conn->query("SHOW COLUMNS FROM nst_realtime LIKE 'session_id'");
 if ($chk && $chk->num_rows === 0) {
     $conn->query("ALTER TABLE nst_realtime ADD COLUMN session_id INT DEFAULT NULL");
 }
 
-// Ambil riwayat per sesi (grouped by session_id)
-// Jika session_id NULL (data lama sebelum fitur ini), tetap tampilkan grouped by tanggal
 $wherePatient = $patient_id > 0 ? "WHERE r.patient_id = $patient_id" : "";
 
 $result = $conn->query("

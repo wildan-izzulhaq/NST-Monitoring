@@ -1,22 +1,4 @@
 <?php
-// ================================================================
-//  latest.php — Data terbaru untuk polling website
-//
-//  Response:
-//  {
-//    "live_id"            : 123,
-//    "bpm"                : 142,
-//    "toco"               : 24,
-//    "bookmark"           : 0,
-//    "recent_bookmark_id" : 5,
-//    "fhr_online"         : true,
-//    "toco_online"        : true,
-//    "recording"          : true,
-//    "session_id"         : 12,
-//    "session_started_at" : "2025-01-01 10:00:00",
-//    "created_at"         : "2025-01-01 10:05:00"
-//  }
-// ================================================================
 
 header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json");
@@ -24,14 +6,12 @@ header("Cache-Control: no-store, no-cache");
 
 require_once "config.php";
 
-// ── 1. Ambil data live terbaru ────────────────────────────────────
 $liveResult = null;
 $rLive = $conn->query("SELECT id, bpm, toco, bookmark, created_at FROM nst_live ORDER BY id DESC LIMIT 1");
 if ($rLive && $rLive->num_rows > 0) {
     $liveResult = $rLive->fetch_assoc();
 }
 
-// Fallback ke nst_realtime jika nst_live kosong
 if (!$liveResult) {
     $rFallback = $conn->query("SELECT id, bpm, toco, bookmark, created_at FROM nst_realtime ORDER BY id DESC LIMIT 1");
     if ($rFallback && $rFallback->num_rows > 0) {
@@ -39,7 +19,6 @@ if (!$liveResult) {
     }
 }
 
-// ── 2. Cek status online per sensor (data dalam 10 detik terakhir) ─
 $fhr_online  = false;
 $toco_online = false;
 
@@ -56,7 +35,6 @@ if ($liveResult) {
     }
 }
 
-// ── 3. Cek sesi recording aktif ───────────────────────────────────
 $recording      = false;
 $session_id     = null;
 $session_started = null;
@@ -78,7 +56,6 @@ if ($rowSetting && $rowSetting['v']) {
     }
 }
 
-// ── 4. Bookmark terbaru dari tabel nst_bookmark ───────────────────
 $recent_bookmark = 0;
 $rBm = $conn->query("SELECT id FROM nst_bookmark ORDER BY id DESC LIMIT 1");
 if ($rBm && $rBm->num_rows > 0) {
@@ -86,7 +63,6 @@ if ($rBm && $rBm->num_rows > 0) {
     $recent_bookmark = intval($bmRow['id']);
 }
 
-// ── 5. Susun response ─────────────────────────────────────────────
 if (!$liveResult) {
     echo json_encode([
         "live_id"             => 0,

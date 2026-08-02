@@ -47,41 +47,33 @@
 <div id="root"></div>
 
 <script type="text/babel">
-// ================================================================
-//  NST Monitor — Website Tugas Akhir
-//  Polling data dari: ./api/latest.php
-// ================================================================
 
 const { useState, useEffect, useRef, useCallback } = React;
 
-// API endpoints (path relatif — tidak perlu diubah)
+// API endpoints
 const API_LATEST      = "./api/latest.php";
 const API_HISTORY     = "./api/history.php";
 const API_HISTORY_DATA = "./api/history_data.php";
 const API_PATIENTS     = "./api/patients.php";
 const API_ACTIVE       = "./api/active_patient.php";
-const POLL_MS         = 500;   // polling fallback jika MQTT gagal
-const OFFLINE_MS      = 10000; // tandai offline jika tidak ada data baru >10 detik
+const POLL_MS         = 500;
+const OFFLINE_MS      = 10000;
 
-// ── Konfigurasi MQTT HiveMQ ──────────────────────────────────
+// Konfigurasi MQTT HiveMQ
 const MQTT_HOST   = "60bade7c84b848c3b1ff035a19f5613f.s1.eu.hivemq.cloud";
-const MQTT_PORT   = 8884;   // WebSocket TLS
-const MQTT_USER   = "nonstresstest";
-const MQTT_PASS   = "Nonstresstest2026";
+const MQTT_PORT   = 8884;
+const MQTT_USER   = "";
+const MQTT_PASS   = "";
 const TOPIC_FHR   = "nst/fhr";
 const TOPIC_TOCO  = "nst/toco";
 
-// ── Konstanta skala kertas NST ──────────────────────────────
-// ESP32 kirim 1 titik per 5 detik (SEND_INTERVAL = 5000ms)
-const DATA_INTERVAL_S = 0.5;  // detik per titik data dari ESP32 (kirim tiap ~500ms)
-// Kecepatan kertas: 1 cm/menit (standar NST)
-// Di layar: 1 menit = 84px  →  10 detik = 14px (kotak kecil)
-const PX_PER_MIN  = 84;                      // piksel per menit (kecepatan kertas)
-const PX_PER_SEC  = PX_PER_MIN / 60;         // piksel per detik
-const PX_PER_PT   = PX_PER_SEC * DATA_INTERVAL_S;  // piksel per titik data (~7px)
-const PTS_PER_MAJOR = Math.round(60 / DATA_INTERVAL_S); // titik per 1 menit = 120
+// Konstanta skala kertas NST
+const DATA_INTERVAL_S = 0.5;
+const PX_PER_MIN  = 84;              
+const PX_PER_SEC  = PX_PER_MIN / 60;
+const PX_PER_PT   = PX_PER_SEC * DATA_INTERVAL_S;
+const PTS_PER_MAJOR = Math.round(60 / DATA_INTERVAL_S);
 
-// ── Error Boundary — mencegah white screen saat runtime error ──
 class ErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { hasError: false, error: null }; }
   static getDerivedStateFromError(error) { return { hasError: true, error }; }
@@ -108,13 +100,12 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-// ── Utilities ────────────────────────────────────────────────────
 const F = "'Nunito', sans-serif";
 const M = "'DM Mono', monospace";
-const KEMENKES_LOGO = "./logo_kemenkes.png"; // Letakkan file logo di folder yang sama
+const KEMENKES_LOGO = "./logo_kemenkes.png";
 
 
-// Klasifikasi status — sama persis dengan fungsi di ESP32 / LCD
+// Klasifikasi status
 const sBPM = b => {
   if (!b || b <= 0)   return "NoSignal";
   if (b < 110)        return "Bradikardi";
@@ -129,7 +120,7 @@ const sTOCO = t => {
   if (t < 80)  return "Normal";
   return "Hipertonik";
 };
-// Helper: apakah status tergolong aman/normal
+
 const isBPMNormal  = b => sBPM(b)  === "Normal";
 const isTOCONormal = t => sTOCO(t) === "Normal";
 
@@ -149,7 +140,7 @@ function fmtTime(str) {
   return d.toLocaleTimeString("id-ID", { hour:"2-digit", minute:"2-digit" });
 }
 
-// ── CTG Canvas (Live) ─────────────────────────────────────────────
+// CTG Canvas (Live)
 const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 }, fwdRef) {
   const ref = fwdRef || useRef(null);
 
@@ -159,7 +150,7 @@ const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 
     const ctx = c.getContext("2d");
     const W = c.width, H = c.height;
 
-    // ── Layout margins ──
+    // Layout margins
     const PL = 54, PB = 40, PT = 8, PR = 10;
     const GAP = 22;
     const GW = W - PL - PR;
@@ -171,44 +162,38 @@ const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 
     const tocoY1 = H - PB;
     const bpmYH  = bpmY1  - bpmY0  - 6;
     const tocoYH = tocoY1 - tocoY0 - 6;
-    // Skala NST standar: BPM 30–240, TOCO 0–100
     const bpmMn = 30, bpmMx = 240, tocoMn = 0, tocoMx = 100;
 
-    // ── Posisi X tiap titik data (strip chart: data terbaru di KANAN) ──
     const n = bH.length;
     const xOf = i => (PL + GW) - (n - 1 - i) * PX_PER_PT;
 
     ctx.clearRect(0, 0, W, H);
 
-    // ── Background kertas CTG — krem/putih seperti kertas asli ──
+    // Background kertas CTG
     ctx.fillStyle = "#fdf6ec"; ctx.fillRect(0, 0, W, H);
     ctx.fillStyle = "#fdf0e8"; ctx.fillRect(PL, bpmY0, GW, bpmY1 - bpmY0);
     ctx.fillStyle = "#f0f0f0"; ctx.fillRect(PL, bpmY1, GW, GAP);
     ctx.fillStyle = "#fdf0e8"; ctx.fillRect(PL, tocoY0, GW, tocoY1 - tocoY0);
 
-    // ── Grid kertas NST — warna coklat/merah muda seperti kertas CTG asli ──
+    // Grid kertas NST
     const pxMinor  = PX_PER_SEC * 10;
     const pxMedium = PX_PER_SEC * 30;
     const pxMajor  = PX_PER_MIN;
     const xRight = PL + GW;
 
     const drawNSTGrid = (y0, y1) => {
-      // Garis horizontal minor (tiap 1/8 tinggi zona) — coklat muda
       ctx.lineWidth = 0.5; ctx.strokeStyle = "rgba(180,100,60,0.18)";
       for (let y = y0; y <= y1; y += (y1 - y0) / 8) {
         ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(PL + GW, y); ctx.stroke();
       }
-      // Vertical minor (10s) — coklat sangat muda
       ctx.strokeStyle = "rgba(180,100,60,0.18)"; ctx.lineWidth = 0.5;
       for (let x = xRight; x >= PL; x -= pxMinor) {
         ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
       }
-      // Vertical medium (30s) — coklat sedang
       ctx.strokeStyle = "rgba(160,80,40,0.32)"; ctx.lineWidth = 0.7;
       for (let x = xRight; x >= PL; x -= pxMedium) {
         ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
       }
-      // Vertical major (1 menit) — coklat tegas
       ctx.strokeStyle = "rgba(140,60,20,0.55)"; ctx.lineWidth = 1.2;
       for (let x = xRight; x >= PL; x -= pxMajor) {
         ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
@@ -217,7 +202,6 @@ const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 
     drawNSTGrid(bpmY0,  bpmY1);
     drawNSTGrid(tocoY0, tocoY1);
 
-    // ── Garis sumbu ──
     ctx.strokeStyle = "rgba(120,70,30,0.4)"; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(PL, bpmY0); ctx.lineTo(PL, tocoY1); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(PL, tocoY1); ctx.lineTo(PL+GW, tocoY1); ctx.stroke();
@@ -225,7 +209,6 @@ const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 
     ctx.beginPath(); ctx.moveTo(PL, bpmY1); ctx.lineTo(PL+GW, bpmY1); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(PL, tocoY0); ctx.lineTo(PL+GW, tocoY0); ctx.stroke();
 
-    // ── Label sumbu Y (BPM) — standar NST: 30,60,90..240 ──
     ctx.textAlign = "right"; ctx.textBaseline = "middle";
     ctx.font = "10px 'DM Mono', monospace";
     for (let v = 30; v <= 240; v += 30) {
@@ -236,13 +219,11 @@ const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 
       ctx.strokeStyle = "rgba(140,60,20,0.3)"; ctx.lineWidth = 0.8;
       ctx.beginPath(); ctx.moveTo(PL-3,y); ctx.lineTo(PL,y); ctx.stroke();
     }
-    // Zona normal BPM (110–160) — hijau transparan
     const yBpm110 = bpmY1 - 6 - ((110-bpmMn)/(bpmMx-bpmMn)) * bpmYH;
     const yBpm160 = bpmY1 - 6 - ((160-bpmMn)/(bpmMx-bpmMn)) * bpmYH;
     ctx.fillStyle = "rgba(134,239,172,0.18)";
     ctx.fillRect(PL, yBpm160, GW, yBpm110 - yBpm160);
 
-    // ── Label sumbu Y (TOCO) — 0,20,40,60,80,100 ──
     [0, 20, 40, 60, 80, 100].forEach(v => {
       const y = tocoY1 - 6 - ((v-tocoMn)/(tocoMx-tocoMn)) * tocoYH;
       ctx.fillStyle = "rgba(120,60,20,0.85)";
@@ -251,10 +232,8 @@ const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 
       ctx.beginPath(); ctx.moveTo(PL-3,y); ctx.lineTo(PL,y); ctx.stroke();
     });
 
-    // ── Label sumbu X — menit:detik, label tiap 1 menit anchored ke kanan ──
     ctx.fillStyle = "#94a3b8"; ctx.textAlign = "center"; ctx.textBaseline = "top";
     ctx.font = "10px 'DM Mono', monospace";
-    // Label setiap pxMajor (1 menit), dari kanan ke kiri
     for (let x = xRight; x >= PL + pxMajor; x -= pxMajor) {
       const secAgo = Math.round((xRight - x) / PX_PER_SEC);
       const m = Math.floor(secAgo / 60), s = secAgo % 60;
@@ -263,33 +242,28 @@ const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 
       ctx.strokeStyle = "rgba(148,163,184,0.3)"; ctx.lineWidth = 0.7;
       ctx.beginPath(); ctx.moveTo(x, tocoY1); ctx.lineTo(x, tocoY1 + 3); ctx.stroke();
     }
-    // Label "Skrg" di ujung kanan — warna hijau agar mencolok
     ctx.fillStyle = "#16a34a"; ctx.font = "bold 10px 'DM Mono', monospace";
     ctx.fillText("Skrg", xRight, tocoY1 + 5);
-    // Garis vertikal hijau putus-putus di posisi "Skrg"
     ctx.strokeStyle = "rgba(22,163,74,0.55)"; ctx.lineWidth = 1.5;
     ctx.setLineDash([3,3]);
     ctx.beginPath(); ctx.moveTo(xRight, bpmY0); ctx.lineTo(xRight, tocoY1); ctx.stroke();
     ctx.setLineDash([]);
-    // Label arah: masa lalu di kiri, saat ini di kanan
     ctx.textAlign = "left"; ctx.fillStyle = "#78350f";
     ctx.font = "bold 9px 'Nunito', sans-serif";
     ctx.fillText("← masa lalu", PL + 4, tocoY1 + 16);
     ctx.textAlign = "right"; ctx.fillStyle = "#15803d";
     ctx.font = "bold 9px 'Nunito', sans-serif";
     ctx.fillText("saat ini →", xRight - 2, tocoY1 + 16);
-    // Keterangan skala di bawah
     ctx.textAlign = "left"; ctx.fillStyle = "#94a3b8";
     ctx.font = "8px 'Nunito', sans-serif";
     ctx.fillText("10det/kotak · 1mnt/major", PL + 4, tocoY1 + 26);
 
-    // ── Clip area plot agar tidak keluar batas kiri ──
     ctx.save();
     ctx.beginPath();
     ctx.rect(PL, bpmY0, GW, tocoY1 - bpmY0);
     ctx.clip();
 
-    // ── Gradient fill — dengan clipping per zona ──
+    // Gradient fill
     const fill = (data, mn, mx, y0, yh, col, clipY0, clipY1) => {
       const pts = data.map((v, i) => ({ x: xOf(i), y: y0 + yh - ((v-mn)/(mx-mn))*yh }))
                       .filter(p => p.x >= PL);
@@ -307,7 +281,7 @@ const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 
     fill(bH, bpmMn, bpmMx, bpmY0+6, bpmYH, "#c0392b", bpmY0, bpmY1);
     fill(tH, tocoMn, tocoMx, tocoY0+6, tocoYH, "#1a5276", tocoY0, tocoY1);
 
-    // ── Garis utama — dengan clipping per zona ──
+    // Garis utama
     const line = (data, mn, mx, y0, yh, col, clipY0, clipY1) => {
       const pts = data.map((v, i) => ({ x: xOf(i), y: y0 + yh - ((v-mn)/(mx-mn))*yh }))
                       .filter(p => p.x >= PL);
@@ -324,15 +298,13 @@ const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 
     line(bH, bpmMn, bpmMx, bpmY0+6, bpmYH, "#c0392b", bpmY0, bpmY1);
     line(tH, tocoMn, tocoMx, tocoY0+6, tocoYH, "#1a5276", tocoY0, tocoY1);
 
-    ctx.restore(); // end clip
+    ctx.restore();
 
-    // ── Bookmark: garis vertikal + titik + label ──
-    // bmIdxs berisi offsetFromRight (0=terbaru, bertambah ke kiri)
+    // Bookmark
     bmIdxs.forEach(offsetFromRight => {
       const x = (PL + GW) - offsetFromRight * PX_PER_PT;
       if (x < PL || x > PL + GW) return;
 
-      // Garis vertikal putus-putus dari atas BPM sampai bawah TOCO
       ctx.save();
       ctx.strokeStyle = "rgba(245,158,11,0.55)";
       ctx.lineWidth = 1.5;
@@ -341,12 +313,10 @@ const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 
       ctx.setLineDash([]);
       ctx.restore();
 
-      // Titik di tengah gap
       ctx.beginPath(); ctx.arc(x, splitY, 6, 0, Math.PI*2);
       ctx.fillStyle = "#f59e0b"; ctx.shadowColor = "#f59e0b"; ctx.shadowBlur = 10;
       ctx.fill(); ctx.shadowBlur = 0;
 
-      // Segitiga panah ke atas (di zona BPM)
       ctx.beginPath();
       ctx.moveTo(x,     bpmY0+14);
       ctx.lineTo(x - 6, bpmY0+24);
@@ -356,7 +326,6 @@ const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 
       ctx.shadowColor = "#f59e0b"; ctx.shadowBlur = 6;
       ctx.fill(); ctx.shadowBlur = 0;
 
-      // Segitiga panah ke bawah (di zona TOCO)
       ctx.beginPath();
       ctx.moveTo(x,     tocoY1-14);
       ctx.lineTo(x - 6, tocoY1-24);
@@ -367,7 +336,7 @@ const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 
       ctx.fill(); ctx.shadowBlur = 0;
     });
 
-    // ── Label section ──
+    // Label section
     ctx.shadowBlur = 0; ctx.textAlign = "left"; ctx.textBaseline = "top";
     ctx.font = "bold 11px 'Nunito', sans-serif";
     ctx.fillStyle = "#c0392b"; ctx.fillText("❤ FHR (bpm)", PL+8, bpmY0+4);
@@ -379,8 +348,7 @@ const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 
     style={{ width:"100%", height:"100%", borderRadius:8, display:"block" }} />;
 });
 
-// ── CTG Canvas (History) ─────────────────────────────────────────
-// ── Fungsi render canvas CTG — dipakai oleh HistGraph preview & PDF ──
+// CTG Canvas (History)
 function renderCTGCanvas(oc, bpmArr, tocoArr, bmIdxs) {
   const nF  = bpmArr.length;
   const oPL = 60, oPB = 32, oPT = 10, oPR = 12, oGAP = 24;
@@ -400,7 +368,7 @@ function renderCTGCanvas(oc, bpmArr, tocoArr, bmIdxs) {
   octx.fillStyle = "rgba(240,240,240,0.90)"; octx.fillRect(oPL, oBpmY1, oGW, oGAP);
   octx.fillStyle = "rgba(240,248,255,0.80)"; octx.fillRect(oPL, oTocoY0, oGW, oTocoY1 - oTocoY0);
 
-  // Grid NST (kertas CTG) — fixed pixel
+  // Grid NST
   const pxMin = PX_PER_SEC * 10, pxMed = PX_PER_SEC * 30, pxMaj = PX_PER_MIN;
   const drawGrid = (y0, y1, cMin, cMed, cMaj) => {
     octx.lineWidth = 0.5; octx.strokeStyle = cMin;
@@ -414,7 +382,6 @@ function renderCTGCanvas(oc, bpmArr, tocoArr, bmIdxs) {
   drawGrid(oBpmY0, oBpmY1,  "rgba(180,100,60,0.18)", "rgba(160,80,40,0.32)",  "rgba(140,60,20,0.55)");
   drawGrid(oTocoY0, oTocoY1,"rgba(80,170,220,0.14)", "rgba(40,130,200,0.25)", "rgba(10,90,170,0.38)");
 
-  // Garis sumbu
   octx.strokeStyle = "rgba(120,70,30,0.45)"; octx.lineWidth = 1;
   octx.beginPath(); octx.moveTo(oPL, oBpmY0); octx.lineTo(oPL, oTocoY1); octx.stroke();
   octx.beginPath(); octx.moveTo(oPL, oTocoY1); octx.lineTo(oPL + oGW, oTocoY1); octx.stroke();
@@ -422,25 +389,21 @@ function renderCTGCanvas(oc, bpmArr, tocoArr, bmIdxs) {
   octx.beginPath(); octx.moveTo(oPL, oBpmY1);  octx.lineTo(oPL + oGW, oBpmY1);  octx.stroke();
   octx.beginPath(); octx.moveTo(oPL, oTocoY0); octx.lineTo(oPL + oGW, oTocoY0); octx.stroke();
 
-  // Label Y BPM
   octx.textAlign = "right"; octx.textBaseline = "middle"; octx.font = "12px monospace";
   for (let v = 30; v <= 240; v += 30) {
     const py = oBpmY1 - 6 - ((v - bMn) / (bMx - bMn)) * oBpmYH;
     if (py < oBpmY0 || py > oBpmY1) continue;
     octx.fillStyle = "rgba(192,57,43,0.85)"; octx.fillText(v, oPL - 6, py);
   }
-  // Label Y TOCO
   [0, 20, 40, 60, 80, 100].forEach(v => {
     const py = oTocoY1 - 6 - ((v - tMn) / (tMx - tMn)) * oTocoYH;
     octx.fillStyle = "rgba(26,82,118,0.85)"; octx.fillText(v, oPL - 6, py);
   });
 
-  // Zona normal BPM hijau
   const yB110 = oBpmY1 - 6 - ((110 - bMn) / (bMx - bMn)) * oBpmYH;
   const yB160 = oBpmY1 - 6 - ((160 - bMn) / (bMx - bMn)) * oBpmYH;
   octx.fillStyle = "rgba(134,239,172,0.18)"; octx.fillRect(oPL, yB160, oGW, yB110 - yB160);
 
-  // Label X — tiap menit, skala nyata
   octx.fillStyle = "rgba(120,60,20,0.7)"; octx.textAlign = "center"; octx.textBaseline = "top"; octx.font = "11px monospace";
   for (let x = oPL; x <= oPL + oGW; x += pxMaj) {
     const sec = Math.round((x - oPL) / PX_PER_SEC);
@@ -452,7 +415,6 @@ function renderCTGCanvas(oc, bpmArr, tocoArr, bmIdxs) {
   octx.textAlign = "right"; octx.fillStyle = "rgba(120,60,20,0.5)"; octx.font = "10px sans-serif";
   octx.fillText("Waktu →", oPL + oGW, oTocoY1 + 18);
 
-  // Fill + Line — dengan clipping per zona agar tidak tembus batas
   const oFill = (arr, mn, mx, y0, yh, col, clipY0, clipY1) => {
     if (!arr || arr.length < 2) return;
     octx.save();
@@ -491,10 +453,8 @@ function renderCTGCanvas(oc, bpmArr, tocoArr, bmIdxs) {
     octx.setLineDash([]); octx.restore();
     octx.beginPath(); octx.arc(x, oSplitY, 6, 0, Math.PI * 2);
     octx.fillStyle = "#f59e0b"; octx.shadowColor = "#f59e0b"; octx.shadowBlur = 8; octx.fill(); octx.shadowBlur = 0;
-    // Segitiga atas
     octx.beginPath(); octx.moveTo(x, oBpmY0+14); octx.lineTo(x-6, oBpmY0+24); octx.lineTo(x+6, oBpmY0+24); octx.closePath();
     octx.fillStyle = "#f59e0b"; octx.shadowColor = "#f59e0b"; octx.shadowBlur = 6; octx.fill(); octx.shadowBlur = 0;
-    // Segitiga bawah
     octx.beginPath(); octx.moveTo(x, oTocoY1-14); octx.lineTo(x-6, oTocoY1-24); octx.lineTo(x+6, oTocoY1-24); octx.closePath();
     octx.fillStyle = "#f59e0b"; octx.shadowColor = "#f59e0b"; octx.shadowBlur = 6; octx.fill(); octx.shadowBlur = 0;
   });
@@ -505,9 +465,7 @@ function renderCTGCanvas(oc, bpmArr, tocoArr, bmIdxs) {
   octx.fillStyle = "#1a5276"; octx.fillText("◈ KONTRAKSI (unit)", oPL + 8, oTocoY0 + 4);
 }
 
-// ══ FUNGSI PDF TERPADU — dipakai oleh savePDF (riwayat) & exportPDF (live) ══
-// params: { bpmArr, tocoArr, bmIdxs, durSec, avgBpm, avgToco,
-//           namaP, rmP, usiaP, catatanP, tglSesi, jamSesi, durStr, bmStr, namaFile }
+// FUNGSI PDF (riwayat) & exportPDF (live)
 function generateNSTPDF(p) {
   const { jsPDF } = window.jspdf;
   if (!jsPDF) { alert("Library PDF belum siap."); return; }
@@ -522,7 +480,7 @@ function generateNSTPDF(p) {
     border:[186,230,253],
   };
 
-  // ── HEADER ──
+  // HEADER
   doc.setFillColor(...C.tealDark); doc.rect(0,0,W,22,"F");
   doc.setFillColor(255,255,255); doc.rect(0,21.5,W,0.5,"F");
   doc.setFillColor(255,255,255); doc.roundedRect(5,3,16,16,2,2,"F");
@@ -545,7 +503,7 @@ function generateNSTPDF(p) {
   let y=30;
   const leftW=PW*0.58, boxH=16;
 
-  // ── IDENTITAS PASIEN ──
+  // IDENTITAS PASIEN
   doc.setFillColor(...C.border); doc.roundedRect(ML+0.8,y+0.8,leftW,boxH,2,2,"F");
   doc.setFillColor(240,253,255); doc.setDrawColor(...C.teal); doc.setLineWidth(0.5);
   doc.roundedRect(ML,y,leftW,boxH,2,2,"FD");
@@ -560,7 +518,7 @@ function generateNSTPDF(p) {
     doc.setFontSize(col.big?9:7.5);doc.setFont("helvetica","bold");doc.setTextColor(...C.slate);doc.text(String(col.v),cx,y+13.5);
   });
 
-  // ── DATA SESI ──
+  // DATA SESI
   const rightX=ML+leftW+5, rightW=PW-leftW-5;
   doc.setFillColor(...C.border); doc.roundedRect(rightX+0.8,y+0.8,rightW,boxH,2,2,"F");
   doc.setFillColor(240,253,255); doc.setDrawColor(...C.teal); doc.setLineWidth(0.5);
@@ -577,7 +535,7 @@ function generateNSTPDF(p) {
   });
   y+=boxH+5;
 
-  // ── STATISTIK ──
+  // STATISTIK
   const statsH=19, statW=PW/2;
   const bpmOk  = p.avgBpm  !== null && p.avgBpm  >= 110 && p.avgBpm  <= 160;
   const tocoOk = p.avgToco !== null && p.avgToco <= 80;
@@ -598,7 +556,7 @@ function generateNSTPDF(p) {
   drawStat(ML+statW, statW,"RATA-RATA TEKANAN KONTRAKSI",  p.avgToco," unit",tocoOk);
   y+=statsH+4;
 
-  // ── LABEL GRAFIK CTG ──
+  // LABEL GRAFIK CTG
   doc.setFillColor(...C.tealDark); doc.roundedRect(ML,y,36,6,1.5,1.5,"F");
   doc.setFontSize(5.5);doc.setFont("helvetica","bold");doc.setTextColor(255,255,255);
   doc.text("GRAFIK CTG",ML+18,y+4,{align:"center"});
@@ -606,16 +564,12 @@ function generateNSTPDF(p) {
   y+=7;
   const grafikH=H-y-10;
 
-  // ── RENDER CANVAS GRAFIK ──
+  // RENDER CANVAS GRAFIK
   try {
     const {bpmArr,tocoArr,bmIdxs,durSec} = p;
     const nF=bpmArr.length;
     const oPL=60,oPB=32,oPT=10,oPR=12,oGAP=24,oh=520;
-
-    // ── Lebar canvas SEMATA-MATA dari durasi (kecepatan kertas standar CTG) ──
-    // Tidak lagi tergantung jumlah titik (nF), supaya PDF dari Live & Riwayat
-    // identik untuk durasi yang sama, terlepas berapa kali sampling dilakukan.
-    // Minimum 900 px agar layout tetap nyaman dibaca untuk sesi sangat singkat.
+    
     const oGW = durSec > 0
       ? Math.max(Math.round(durSec * PX_PER_SEC), 900-oPL-oPR)
       : Math.max(900-oPL-oPR, nF*PX_PER_PT);
@@ -629,8 +583,7 @@ function generateNSTPDF(p) {
     const oTocoY0=oSplitY+oGAP/2, oTocoY1=oh-oPB;
     const oBpmYH=oBpmY1-oBpmY0-6, oTocoYH=oTocoY1-oTocoY0-6;
     const bMn=30,bMx=240,tMn=0,tMx=100;
-    // ── Distribusi titik MERATA sepanjang oGW (waktu nyata), bukan per-pixel-titik ──
-    // Titik ke-i diposisikan di waktu (i / (nF-1)) * durSec dari awal.
+
     const oxOf = i => {
       if (nF <= 1) return oPL;
       const ratio = i / (nF - 1);
@@ -681,7 +634,7 @@ function generateNSTPDF(p) {
     const yB110=oBpmY1-6-((110-bMn)/(bMx-bMn))*oBpmYH, yB160=oBpmY1-6-((160-bMn)/(bMx-bMn))*oBpmYH;
     octx.fillStyle="rgba(134,239,172,0.18)"; octx.fillRect(oPL,yB160,oGW,yB110-yB160);
 
-    // Label X — presisi dari durSec (detik nyata) dibagi jumlah titik
+    // Label X
     const actualIvl = (nF > 1 && durSec > 0) ? durSec/(nF-1) : DATA_INTERVAL_S;
     const ptsMaj    = Math.max(1, Math.round(60/actualIvl));
     octx.fillStyle="rgba(120,60,20,0.7)"; octx.textAlign="center"; octx.textBaseline="top"; octx.font="11px monospace";
@@ -698,7 +651,7 @@ function generateNSTPDF(p) {
     octx.textAlign="right"; octx.fillStyle="rgba(120,60,20,0.5)"; octx.font="10px sans-serif";
     octx.fillText("Waktu →",oPL+oGW,oTocoY1+18);
 
-    // Fill + Line — dengan clipping per zona agar tidak tembus batas
+    // Fill + Line
     const oFill=(arr,mn,mx,y0,yh,col,clipY0,clipY1)=>{
       if(!arr||arr.length<2)return;
       octx.save();
@@ -752,13 +705,13 @@ function generateNSTPDF(p) {
     doc.addImage(oc.toDataURL("image/png"),"PNG",ML+1,y+1,PW-2,grafikH-2);
   } catch(e){console.warn("CTG canvas error:",e);}
 
-  // ── Catatan ──
+  // Catatan
   if(p.catatanP){
     doc.setFontSize(6);doc.setFont("helvetica","italic");doc.setTextColor(...C.muted);
     doc.text("Catatan: "+p.catatanP.substring(0,120),ML,H-5.5);
   }
 
-  // ── Footer ──
+  // Footer
   doc.setFillColor(...C.tealDark);doc.rect(0,H-8,W,8,"F");
   doc.setFillColor(255,255,255);doc.roundedRect(3,H-7.5,7,7,1,1,"F");
   try{doc.addImage(KEMENKES_LOGO,"PNG",3.5,H-7,6,6);}catch(e){}
@@ -784,12 +737,11 @@ function HistGraph({ data, dateLabel, sessionRec, pasien, lastPdfBlob, lastPdfNa
     const nF = bpmArr.length;
     if (nF === 0) return;
 
-    // ── Canvas dengan lebar proporsional waktu nyata ──
+    // Canvas dengan lebar proporsional waktu nyata
     const oPL = 60, oPR = 12, oh = 300;
     const oGW = Math.max(800, nF * PX_PER_PT);
     const ow  = oGW + oPL + oPR;
 
-    // Buat / resize canvas di dalam scroll container
     const container = scrollRef.current;
     if (!container) return;
     let canvas = container.querySelector("canvas");
@@ -802,11 +754,7 @@ function HistGraph({ data, dateLabel, sessionRec, pasien, lastPdfBlob, lastPdfNa
     renderCTGCanvas(canvas, bpmArr, tocoArr, bmIdxs);
   }, [data]);
 
-  // ── Export Riwayat sebagai PDF ─────────────────────────────────
-  // Fast-path: jika sesi yang sedang dibuka memang sesi terakhir yang baru
-  // disimpan dari Monitor Live (cocokkan via session_id), pakai blob yang
-  // sudah ada. Selain itu, generate ulang dari data DB — formatnya identik
-  // karena memakai fungsi generateNSTPDF() yang sama persis dengan exportPDF.
+  // Export Riwayat sebagai PDF
   const savePDF = () => {
     if (!data) { alert("Data grafik belum termuat."); return; }
     const bpmArr  = data.bpm_data  || [];
@@ -814,7 +762,6 @@ function HistGraph({ data, dateLabel, sessionRec, pasien, lastPdfBlob, lastPdfNa
     const bmIdxs  = data.bm_indexes || [];
     if (bpmArr.length === 0) { alert("Data sesi ini kosong, tidak ada yang bisa disimpan."); return; }
 
-    // Helper: parse string durasi seperti "12 mnt" / "45 dtk" / "1 mnt 30 dtk" → detik
     const parseDurStr = (s) => {
       if (!s || typeof s !== "string") return 0;
       let total = 0;
@@ -823,13 +770,10 @@ function HistGraph({ data, dateLabel, sessionRec, pasien, lastPdfBlob, lastPdfNa
       return total;
     };
 
-    // Pilih nama file canonik (sama format dengan exportPDF di Monitor Live)
     const tglIso = (sessionRec?.tanggal || new Date().toISOString().slice(0,10));
     const namaForFile = (pasien?.nama || "Pasien").replace(/ /g,"_");
     const namaFile = "NST_" + namaForFile + "_" + tglIso + ".pdf";
 
-    // Fast-path: blob sudah ada DAN session_id-nya cocok dengan yang sedang
-    // ditampilkan. Cek nama file (mengandung tanggal sesi) sebagai pengaman.
     if (lastPdfBlob && lastPdfName && lastPdfName === namaFile) {
       const url = URL.createObjectURL(lastPdfBlob);
       const a = document.createElement("a");
@@ -838,26 +782,20 @@ function HistGraph({ data, dateLabel, sessionRec, pasien, lastPdfBlob, lastPdfNa
       return;
     }
 
-    // ── Slow-path: generate ulang dari data DB ──
     const nF = bpmArr.length;
 
-    // Durasi: prioritas total_raw (jumlah titik asli sebelum downsample) ×
-    // interval, fallback ke parsing string "rec.durasi", fallback ke nF.
     const totalRaw = parseInt(data.total_raw || 0);
     let durSec = totalRaw > 0 ? Math.round(totalRaw * DATA_INTERVAL_S) : 0;
     if (!durSec) durSec = parseDurStr(sessionRec?.durasi);
     if (!durSec) durSec = Math.round(nF * DATA_INTERVAL_S);
 
-    // Statistik dari data yang ada (sama metode dgn exportPDF)
     const avgBpm  = Math.round(bpmArr.reduce((a,b)=>a+b,0)/nF);
     const avgToco = tocoArr.length ? Math.round(tocoArr.reduce((a,b)=>a+b,0)/tocoArr.length) : null;
 
-    // Format string sesuai gaya exportPDF
     const durStr = durSec < 60
       ? durSec + " dtk"
       : Math.floor(durSec/60) + " mnt" + (durSec%60 ? " " + durSec%60 + " dtk" : "");
 
-    // Tanggal & jam: dari sessionRec (data DB) — bukan jam sekarang
     let tglSesiStr = "-";
     if (sessionRec?.tanggal) {
       try {
@@ -867,7 +805,7 @@ function HistGraph({ data, dateLabel, sessionRec, pasien, lastPdfBlob, lastPdfNa
     }
     const jamSesi = sessionRec?.jam || "-";
 
-    // Bookmark count: prioritas dari rec (lebih akurat krn dari DB sebelum downsample)
+    // Bookmark count
     const bmCount = (sessionRec?.bm_count != null) ? sessionRec.bm_count : bmIdxs.length;
 
     generateNSTPDF({
@@ -906,7 +844,7 @@ function HistGraph({ data, dateLabel, sessionRec, pasien, lastPdfBlob, lastPdfNa
   );
 }
 
-// ── Alarm Banner ──────────────────────────────────────────────────
+// Alarm Banner
 function Alarm({ msgs }) {
   if (!msgs.length) return null;
   return (
@@ -927,7 +865,7 @@ function Alarm({ msgs }) {
   );
 }
 
-// ── Status Card ───────────────────────────────────────────────────
+// Status Card
 function StatCard({ label, status, icon, detail }) {
   const ok = status === "Normal";
   return (
@@ -948,7 +886,7 @@ function StatCard({ label, status, icon, detail }) {
   );
 }
 
-// ── Progress Bar ──────────────────────────────────────────────────
+// Progress Bar
 function Bar({ value, max, color }) {
   return (
     <div style={{ marginTop:10, height:3, borderRadius:99, background:"rgba(0,0,0,.08)" }}>
@@ -962,9 +900,7 @@ function Bar({ value, max, color }) {
   );
 }
 
-// ════════════════════════════════════════════════════════════════
-//  LANDING PAGE — komponen terpisah agar hooks tidak kondisional
-// ════════════════════════════════════════════════════════════════
+//  LANDING PAGE
 function LandingPage({ onLogin }) {
   const [activeFaq,    setActiveFaq]    = useState(null);
   const [patientCount, setPatientCount] = useState(null);
@@ -975,7 +911,6 @@ function LandingPage({ onLogin }) {
   useEffect(() => {
     const onScroll = () => {
       const curr = window.scrollY;
-      // Tampilkan jika scroll ke atas atau di paling atas
       setNavVisible(curr < lastScrollY.current || curr < 60);
       lastScrollY.current = curr;
     };
@@ -1326,11 +1261,9 @@ function LandingPage({ onLogin }) {
   );
 }
 
-// ════════════════════════════════════════════════════════════════
 //  MAIN APP
-// ════════════════════════════════════════════════════════════════
 function App() {
-  const [page,  setPage]  = useState("landing"); // mulai dari landing, bukan login
+  const [page,  setPage]  = useState("landing");
   const [tab,   setTab]   = useState("monitor");
   const [user,  setUser]  = useState(null);
   const [loginU, setLoginU] = useState("");
@@ -1353,26 +1286,26 @@ function App() {
   // Live data state
   const [bpm,    setBpm]    = useState(null);
   const [toco,   setToco]   = useState(null);
-  const [bpmH,   setBpmH]   = useState([]);   // sliding window 90 detik untuk tampilan
-  const [tocoH,  setTocoH]  = useState([]);   // sliding window 90 detik untuk tampilan
+  const [bpmH,   setBpmH]   = useState([]);
+  const [tocoH,  setTocoH]  = useState([]);
   const [bmIdxs, setBmIdxs] = useState([]);
   const [lastBm, setLastBm] = useState(null);
-  // Full-session arrays tanpa batas — untuk PDF
+  // Full-session arrays
   const [bpmFull,    setBpmFull]    = useState([]);
   const [tocoFull,   setTocoFull]   = useState([]);
   const [bmIdxsFull, setBmIdxsFull] = useState([]);
   const [online, setOnline] = useState(false);
   const [lastUpdateStr, setLastUpdateStr] = useState(null);
-  // Status koneksi per-sensor (untuk 2 ESP32 terpisah)
+  // Status koneksi per-sensor
   const [fhrOnline,  setFhrOnline]  = useState(false);
   const [tocoOnline, setTocoOnline] = useState(false);
   // Status recording session
   const [recording,        setRecording]        = useState(false);
   const [sessionId,        setSessionId]        = useState(null);
   const [sessionStartedAt, setSessionStartedAt] = useState(null);
-  const [recDuration,      setRecDuration]      = useState(0); // detik
-  const [lastRecDuration,  setLastRecDuration]  = useState(0); // durasi tersimpan setelah stop
-  const [lastPdfBlob,      setLastPdfBlob]      = useState(null); // PDF blob dari exportPDF
+  const [recDuration,      setRecDuration]      = useState(0);
+  const [lastRecDuration,  setLastRecDuration]  = useState(0);
+  const [lastPdfBlob,      setLastPdfBlob]      = useState(null);
   const [lastPdfName,      setLastPdfName]      = useState("laporan.pdf");
 
   // History state
@@ -1383,22 +1316,22 @@ function App() {
   const [histGraphLoading, setHistGraphLoading] = useState(false);
   const [histGraphError, setHistGraphError] = useState("");
   const [histNeedsRefresh, setHistNeedsRefresh] = useState(false);
-  const [hasRecordingEnded, setHasRecordingEnded] = useState(false); // true setelah stop
+  const [hasRecordingEnded, setHasRecordingEnded] = useState(false);
 
   // Refs to avoid stale closures
   const lastTsRef      = useRef(null);
   const lastBmTsRef    = useRef(0);
-  const lastBmIdRef    = useRef(0);   // ID bookmark dari server (angka DB kecil)
-  const lastBmMqttRef  = useRef(0);   // timestamp bookmark dari MQTT (Date.now())
+  const lastBmIdRef    = useRef(0);
+  const lastBmMqttRef  = useRef(0);
   const offTimerRef    = useRef(null);
   const bpmHLenRef     = useRef(0);
   const ctgRef         = useRef(null);
   const mqttClientRef  = useRef(null);
-  const lastBpmValRef  = useRef(null); // nilai BPM terakhir — untuk sinkronisasi grafik
-  const lastTocoValRef = useRef(null); // nilai TOCO terakhir — untuk sinkronisasi grafik
+  const lastBpmValRef  = useRef(null);
+  const lastTocoValRef = useRef(null);
   const prevRecordingRef = useRef(false);
-  const recordingRef     = useRef(false); // mirror recording state untuk useCallback
-  const sessionStartedRef = useRef(false); // sudah set sessionStartedAt untuk sesi ini?
+  const recordingRef     = useRef(false);
+  const sessionStartedRef = useRef(false);
   const [mqttStatus, setMqttStatus] = useState("connecting");
 
   // Demo mode
@@ -1412,25 +1345,22 @@ function App() {
   if (bpm  !== null && !isBPMNormal(bpm))  alarmMsgs.push(`DJJ ${bpm} bpm — ${sBPM(bpm)} (Normal: 110–160)`);
   if (toco !== null && !isTOCONormal(toco)) alarmMsgs.push(`TOCO ${toco} unit — ${sTOCO(toco)} (Normal: 25–80)`);
 
-  // ── Helper: proses satu titik data baru (dipanggil dari MQTT handler) ────
   const processLiveData = useCallback((bpmVal, tocoVal, bmId) => {
-    // Update nilai terbaru untuk display angka
+    // Update nilai terbaru
     if (bpmVal  !== null && bpmVal  !== undefined) { setBpm(bpmVal);  lastBpmValRef.current  = bpmVal;  }
     if (tocoVal !== null && tocoVal !== undefined) { setToco(tocoVal); lastTocoValRef.current = tocoVal; }
 
-    // Gunakan nilai terakhir jika salah satu null — agar grafik SELALU sejajar
+    // Gunakan nilai terakhir jika salah satu null
     const bpmPush  = (bpmVal  !== null && bpmVal  !== undefined) ? bpmVal  : lastBpmValRef.current;
     const tocoPush = (tocoVal !== null && tocoVal !== undefined) ? tocoVal : lastTocoValRef.current;
 
-    // Push ke grafik sliding window (selalu, untuk tampilan live)
+    // Push ke grafik sliding window
     if (bpmPush !== null || tocoPush !== null) {
       if (bpmPush  !== null) setBpmH(h  => [...h.slice(-1199),  bpmPush]);
       if (tocoPush !== null) setTocoH(h => [...h.slice(-1199), tocoPush]);
       setBmIdxs(prev => prev.map(o => o + 1).filter(o => o < 1200));
     }
 
-    // Push ke Full arrays HANYA saat recording aktif
-    // Full arrays = data yang akan dijadikan PDF, hanya dari Start sampai Stop
     if (recordingRef.current) {
       if (bpmPush  !== null) setBpmFull(h  => [...h, bpmPush]);
       if (tocoPush !== null) setTocoFull(h => [...h, tocoPush]);
@@ -1439,7 +1369,6 @@ function App() {
     if (bmId && bmId !== lastBmIdRef.current) {
       lastBmIdRef.current = bmId;
       setBmIdxs(prev => [...prev, 0]);
-      // Bookmark di Full hanya jika sedang recording
       if (recordingRef.current) {
         setBpmFull(h => { setBmIdxsFull(prev => [...prev, h.length]); return h; });
       }
@@ -1460,7 +1389,6 @@ function App() {
     }, 60000);
   }, []);
 
-  // ── Polling latest.php — HANYA untuk sinkronisasi session/recording state ──
   const fetchLatest = useCallback(async () => {
     try {
       const res = await fetch(API_LATEST + "?t=" + Date.now(), { cache:"no-store" });
@@ -1473,46 +1401,36 @@ function App() {
       setTocoOnline(!!toco_online);
 
       const recNow = !!data.recording;
-      const wasRec = recordingRef.current; // pakai ref, bukan state (tidak stale)
-
-      // Sync ref dulu sebelum set state
+      const wasRec = recordingRef.current;
       recordingRef.current = recNow;
       setRecording(recNow);
       setSessionId(data.session_id || null);
 
       if (recNow) {
-        // Recording aktif — set sessionStartedAt hanya SEKALI per sesi
-        // sessionStartedRef reset ke false saat recording berhenti (di bawah)
         if (!sessionStartedRef.current) {
           sessionStartedRef.current = true;
           if (!wasRec) {
-            // Baru mulai — pakai waktu browser sekarang (bebas timezone)
             setSessionStartedAt(new Date().toISOString());
           } else if (data.session_started_at) {
-            // Refresh halaman saat sudah recording — kompensasi timezone WIB
             const serverTime = new Date(data.session_started_at.replace(" ","T") + "+07:00");
             setSessionStartedAt(serverTime.toISOString());
           }
         }
       } else {
-        // Recording berhenti — simpan durasi terakhir, lalu reset
         sessionStartedRef.current = false;
         setSessionStartedAt(null);
         setRecDuration(prev => { if (prev > 0) setLastRecDuration(prev); return 0; });
       }
 
-      // BOOKMARK: dihapus dari sini — sudah ditangani MQTT
-      // Polling server tidak lagi trigger bookmark agar tidak double
     } catch(e) {
-      // Abaikan error polling — MQTT tetap jalan
     }
   }, []);
 
-  // ── Hitung durasi recording secara real-time ────────────────
+  // Hitung durasi recording secara real-time
   useEffect(() => {
     if (!recording || !sessionStartedAt) { setRecDuration(0); return; }
     const calc = () => {
-      const start = new Date(sessionStartedAt); // ISO string dari browser, tidak perlu replace
+      const start = new Date(sessionStartedAt);
       setRecDuration(Math.floor((Date.now() - start.getTime()) / 1000));
     };
     calc();
@@ -1520,13 +1438,13 @@ function App() {
     return () => clearInterval(iv);
   }, [recording, sessionStartedAt]);
 
-  // ── Load patients when pilih_pasien page is shown ────────────────────────────
+  // Load patients when pilih_pasien page is shown
   useEffect(() => {
     if (page !== "pilih_pasien") return;
     loadPatients();
   }, [page]);
 
-  // ── MQTT: connect & subscribe saat dashboard tampil ───────────
+  // MQTT: connect & subscribe
   useEffect(() => {
     if (page !== "dashboard" || demoMode) return;
 
@@ -1556,7 +1474,7 @@ function App() {
     client.on("reconnect", () => setMqttStatus("connecting"));
     client.on("offline",   () => setMqttStatus("error"));
 
-    // Buffer untuk sinkronisasi FHR + TOCO sebelum push ke grafik
+    // Buffer
     let fhrBuf  = null;
     let tocoBuf = null;
     let syncTimer = null;
@@ -1571,15 +1489,10 @@ function App() {
           tocoBuf = msg.toco ?? null;
           setTocoOnline(true);
 
-          // ── Deteksi bookmark LANGSUNG di sini, SEBELUM syncTimer ──
-          // Jangan taruh di dalam syncTimer karena buffer akan di-reset duluan
           if (msg.bookmark === 1) {
             const now = Date.now();
-            // Debounce 1500ms pakai ref MQTT sendiri — tidak tercampur dengan ref server
             if (now - lastBmMqttRef.current > 1500) {
               lastBmMqttRef.current = now;
-              // Sync juga lastBmIdRef agar polling server tidak double-trigger
-              // Set ke nilai negatif besar — tidak akan pernah cocok dengan ID DB
               lastBmIdRef.current = -now;
               setBmIdxs(prev => [...prev, 0]);
               setBpmFull(h => { setBmIdxsFull(prev => [...prev, h.length]); return h; });
@@ -1590,15 +1503,12 @@ function App() {
           }
         }
 
-        // Debounce ringan: tunggu 20ms agar FHR + TOCO bisa tiba bersama
         if (syncTimer) clearTimeout(syncTimer);
         syncTimer = setTimeout(() => {
-          // Ambil snapshot buffer SEBELUM di-reset
           const bv = fhrBuf;
           const tv = tocoBuf;
           fhrBuf  = null;
           tocoBuf = null;
-          // Hanya push ke grafik jika ada nilai — bookmark sudah diproses di atas
           if (bv !== null || tv !== null) processLiveData(bv, tv, null);
         }, 20);
 
@@ -1607,7 +1517,6 @@ function App() {
       }
     });
 
-    // Polling ringan tiap 5 detik — hanya untuk session/recording state
     fetchLatest();
     const sessionPoll = setInterval(fetchLatest, 5000);
 
@@ -1621,14 +1530,12 @@ function App() {
     };
   }, [page, fetchLatest, processLiveData, demoMode]);
 
-  // ── Handle transisi recording state ────────────────────────
+  // Handle transisi recording state
   useEffect(() => {
-    // recordingRef sudah di-sync di fetchLatest — tidak perlu sync lagi di sini
 
     const wasRecording = prevRecordingRef.current;
     prevRecordingRef.current = recording;
 
-    // Transisi false → true: recording MULAI — reset Full arrays
     if (!wasRecording && recording) {
       setBpmFull([]);
       setTocoFull([]);
@@ -1636,11 +1543,9 @@ function App() {
       setHasRecordingEnded(false);
     }
 
-    // Transisi true → false: recording BERHENTI
     if (wasRecording && !recording && page === "dashboard") {
       setHasRecordingEnded(true);
 
-      // Polling agresif: coba 5 kali tiap 2 detik sampai data muncul
       let attempt = 0;
       const tryFetch = () => {
         attempt++;
@@ -1659,17 +1564,15 @@ function App() {
           });
       };
       setHistLoading(true);
-      setTimeout(tryFetch, 1500); // mulai setelah 1.5 detik
+      setTimeout(tryFetch, 1500);
     }
   }, [recording]);
 
-  // ── Reload patients when pasien tab opens ────────────────────
   useEffect(() => {
     if (page !== "dashboard" || tab !== "pasien") return;
     loadPatients();
   }, [page, tab]);
 
-  // ── Fetch history list when tab changes ───────────────────────
   useEffect(() => {
     if (page !== "dashboard" || tab !== "history") return;
     setHistLoading(true);
@@ -1679,7 +1582,6 @@ function App() {
       .catch(() => { setHistList([]); setHistLoading(false); });
   }, [page, tab, histNeedsRefresh]);
 
-  // ── Fetch graph data dari API (tidak toggle) ──────────────────
   const fetchHistGraph = (tanggal, session_id) => {
     setHistGraphData(null);
     setHistGraphError("");
@@ -1715,11 +1617,9 @@ function App() {
       });
   };
 
-  // ── Toggle expand-collapse dari klik card riwayat ─────────────
   const loadHistGraph = (tanggal, session_id) => {
     const key = session_id ? String(session_id) : tanggal;
     if (selectedDate === key) {
-      // Klik kedua → tutup
       setSelectedDate(null);
       setHistGraphData(null);
       setHistGraphError("");
@@ -1729,7 +1629,7 @@ function App() {
     fetchHistGraph(tanggal, session_id);
   };
 
-  // ── Demo Mode ─────────────────────────────────────────────────
+  // Demo Mode
   const startDemo = () => {
     const demoPasien = {
       id: 0,
@@ -1748,12 +1648,10 @@ function App() {
     setTab("monitor");
     setBpm(null); setToco(null); setBpmH([]); setTocoH([]); setBmIdxs([]); setLastBm(null); setBpmFull([]); setTocoFull([]); setBmIdxsFull([]);
 
-    // Simulasi data bergerak seperti alat nyata
     let tick = 0;
     let baseBpm = 135, baseToco = 20;
     demoIntervalRef.current = setInterval(() => {
       tick++;
-      // Variasi sinusoidal + noise acak agar terlihat realistis
       const nb = Math.round(baseBpm + Math.sin(tick * 0.07) * 12 + (Math.random() - 0.5) * 6);
       const nt = Math.round(baseToco + Math.sin(tick * 0.04) * 18 + (Math.random() - 0.5) * 4);
       const bpmVal  = Math.max(105, Math.min(175, nb));
@@ -1769,7 +1667,6 @@ function App() {
       setFhrOnline(true); setTocoOnline(true);
       setLastUpdateStr(new Date().toLocaleTimeString("id-ID", { hour:"2-digit", minute:"2-digit", second:"2-digit" }));
 
-      // Simulasi bookmark tiap ~15 detik
       if (tick % 30 === 0) {
         setBmIdxs(prev => [...prev, bpmHLenRef.current]);
         setBpmFull(h => { setBmIdxsFull(prev => [...prev, h.length - 1]); return h; });
@@ -1791,7 +1688,7 @@ function App() {
   };
 
   const login = () => {
-    if (loginU === "dokter" && loginP === "nst2026") {
+    if (loginU === "" && loginP === "") {
       setUser({ name:"Dr. Admin", role:"Dokter Spesialis" });
       setPage("pilih_pasien"); setLoginErr("");
     } else {
@@ -1815,7 +1712,7 @@ function App() {
     if (!newPasien.no_rekam_medis.trim())    { setPasienErr("No. Rekam Medis wajib diisi."); return; }
     if (!newPasien.usia_kehamilan.toString().trim()) { setPasienErr("Usia kehamilan wajib diisi."); return; }
 
-    // Cek duplikat No. Rekam Medis (prioritas utama — harus unik)
+    // Cek duplikat No. Rekam Medis
     const dupRM = patientList.find(p =>
       p.no_rekam_medis &&
       p.no_rekam_medis.trim().toLowerCase() === newPasien.no_rekam_medis.trim().toLowerCase()
@@ -1825,7 +1722,7 @@ function App() {
       return;
     }
 
-    // Cek duplikat Nama (peringatan — nama bisa sama tapi beda orang, tetap blok)
+    // Cek duplikat Nama
     const dupNama = patientList.find(p =>
       p.nama.trim().toLowerCase() === newPasien.nama.trim().toLowerCase()
     );
@@ -1840,7 +1737,6 @@ function App() {
         method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify(newPasien)
       });
-      // Cek jika server return halaman error (bukan JSON)
       const contentType = res.headers.get("content-type") || "";
       if (!contentType.includes("application/json")) {
         const text = await res.text();
@@ -1871,7 +1767,6 @@ function App() {
     // Reset live data
     setBpm(null); setToco(null); setBpmH([]); setTocoH([]); setBmIdxs([]); setLastBm(null); setBpmFull([]); setTocoFull([]); setBmIdxsFull([]);
     setRecording(false); setSessionId(null); setSessionStartedAt(null); setRecDuration(0);
-    // Beritahu server pasien mana yang aktif → ESP32 akan ambil otomatis
     fetch(API_ACTIVE, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
@@ -1886,7 +1781,7 @@ function App() {
     const nF = bpmFull.length;
     if (nF === 0) return;
 
-    // Durasi: prioritas lastRecDuration > recDuration > hitungan titik
+    // Durasi
     const durSec = lastRecDuration > 0 ? lastRecDuration
                  : recDuration > 0     ? recDuration
                  : Math.round(nF * DATA_INTERVAL_S);
@@ -1899,7 +1794,7 @@ function App() {
       ? durSec + " dtk"
       : Math.floor(durSec/60) + " mnt" + (durSec%60 ? " " + durSec%60 + " dtk" : "");
 
-    // Jam mulai: ambil dari sessionStartedAt jika ada, fallback ke jam sekarang
+    // Jam mulai
     const jamMulai = sessionStartedAt
       ? new Date(sessionStartedAt).toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit"})
       : now.toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit"});
@@ -1918,11 +1813,9 @@ function App() {
       durStr, bmStr: bmIdxsFull.length+"x", namaFile,
       returnBlob: true,
     });
-    // Simpan blob ke state agar riwayat bisa download langsung tanpa render ulang
     if (blob) {
       setLastPdfBlob(blob);
       setLastPdfName(namaFile);
-      // Langsung download juga
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url; a.download = namaFile; a.click();
@@ -1930,7 +1823,7 @@ function App() {
     }
   };
 
-  // Format durasi detik → "mm:ss" atau "hh:mm:ss"
+  // Format durasi
   const fmtDurasi = (sec) => {
     const h = Math.floor(sec / 3600);
     const m = Math.floor((sec % 3600) / 60);
@@ -1939,19 +1832,14 @@ function App() {
     return `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
   };
 
-  // Hitung usia dari tanggal lahir
+  // Hitung usia
   const hitungUsia = (tgl) => {
     if (!tgl) return "-";
     const d = new Date(tgl), now = new Date();
     return Math.floor((now - d) / (1000*60*60*24*365.25)) + " tahun";
   };
 
-  // ════════════════════════════════════════════════════════════
   //  LOGIN PAGE
-  // ════════════════════════════════════════════════════════════
-  // ══════════════════════════════════════════════════════════════
-  //   LANDING PAGE
-  // ══════════════════════════════════════════════════════════════
   if (page === "landing") return <LandingPage onLogin={() => setPage("login")} />;
 
   if (page === "login") return (
@@ -2037,9 +1925,7 @@ function App() {
     </div>
   );
 
-  // ════════════════════════════════════════════════════════════
   //  PILIH PASIEN PAGE
-  // ════════════════════════════════════════════════════════════
   if (page === "pilih_pasien") {
     const filtered = patientList.filter(p =>
       p.nama.toLowerCase().includes(patientSearch.toLowerCase()) ||
@@ -2303,9 +2189,7 @@ function App() {
     );
   }
 
-  // ════════════════════════════════════════════════════════════
   //  DASHBOARD
-  // ════════════════════════════════════════════════════════════
   const alarmH = alarmMsgs.length ? 50 : 0;
 
   return (
@@ -3202,7 +3086,7 @@ function App() {
                     {/* Tombol Hapus Riwayat */}
                     <button
                       onClick={e => {
-                        e.stopPropagation(); // jangan trigger loadHistGraph
+                        e.stopPropagation();
                         if (!window.confirm(`Hapus riwayat Sesi #${rec.session_id}?\nData yang sudah dihapus tidak bisa dikembalikan.`)) return;
                         fetch(API_ACTIVE.replace("active_patient.php","delete_history.php"), {
                           method:"POST",

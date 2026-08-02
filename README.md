@@ -3,7 +3,7 @@
 
 ## Tentang Project
 Sistem monitoring janin berbasis IoT yang dirancang untuk kebutuhan klinis di rumah sakit.
-Dikembangkan sebagai **Tugas Akhir DIII Teknik Elektromedik** — Poltekkes Kemenkes Surabaya.
+Dikembangkan sebagai **Tugas Akhir DIII Teknik Elektromedik** | Poltekkes Kemenkes Surabaya.
 
 ## Teknologi yang Digunakan
 | Komponen | Teknologi |
@@ -34,16 +34,15 @@ Diuji pada ibu hamil trimester ketiga dan dibandingkan langsung dengan:
 ```
 nst-fetal-monitoring/
 ├── backend/          → File Python & database schema
-├── frontend/         → File HTML, JavaScript, CSS
+├── frontend/         → File HTML
 ├── hardware/         → Firmware ESP32 (.ino)
-├── docs/             → Dokumentasi teknis
-└── images/           → Foto alat & screenshot dashboard
+└── docs/             → Dokumentasi teknis
 ```
 
 ## Cara Menjalankan
 1. Clone atau download repository ini
 2. Install dependencies: `pip install -r requirements.txt`
-3. Setup database: import file `schema.sql` ke MySQL
+3. Setup database: import file `database_structure_nst.sql` ke MySQL
 4. Jalankan backend: `python app.py`
 5. Buka browser, akses dashboard di `localhost:5000`
 

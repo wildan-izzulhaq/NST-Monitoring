@@ -1,0 +1,3595 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NST Monitor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <!-- MQTT.js untuk koneksi WebSocket ke HiveMQ -->
+  <script src="https://unpkg.com/mqtt@5.3.4/dist/mqtt.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #f8f4ef; font-family: 'Nunito', sans-serif; }
+    @keyframes pulse-ring {
+      0%   { transform: scale(1);   opacity: .7; }
+      70%  { transform: scale(1.6); opacity: 0;  }
+      100% { transform: scale(1.6); opacity: 0;  }
+    }
+    @keyframes fadeSlideIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0);    }
+    }
+    @keyframes blink-alarm {
+      0%, 100% { opacity: 1;  }
+      50%       { opacity: .3; }
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes bounce-in {
+      0%   { transform: scale(.4); opacity: 0;  }
+      70%  { transform: scale(1.2);              }
+      100% { transform: scale(1);  opacity: 1;  }
+    }
+    .card-h { transition: transform .2s, box-shadow .2s; }
+    .card-h:hover { transform: translateY(-2px); box-shadow: 0 14px 40px rgba(0,0,0,.10) !important; }
+    .tab-btn:hover { color: #f43f5e !important; }
+    .hist-row { cursor: pointer; transition: all .2s; }
+    .pasien-card { cursor: pointer; transition: transform .15s, box-shadow .15s, border-color .15s; }
+    .pasien-card:hover { transform: translateY(-2px); border-color: #fda4af !important; box-shadow: 0 8px 28px rgba(253,164,175,.25) !important; }
+    .hist-row:hover { border-color: #fda4af !important; background: rgba(255,255,255,.95) !important; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+// ================================================================
+//  NST Monitor — Website Tugas Akhir
+//  Polling data dari: ./api/latest.php
+// ================================================================
+
+const { useState, useEffect, useRef, useCallback } = React;
+
+// API endpoints (path relatif — tidak perlu diubah)
+const API_LATEST      = "./api/latest.php";
+const API_HISTORY     = "./api/history.php";
+const API_HISTORY_DATA = "./api/history_data.php";
+const API_PATIENTS     = "./api/patients.php";
+const API_ACTIVE       = "./api/active_patient.php";
+const POLL_MS         = 500;   // polling fallback jika MQTT gagal
+const OFFLINE_MS      = 10000; // tandai offline jika tidak ada data baru >10 detik
+
+// ── Konfigurasi MQTT HiveMQ ──────────────────────────────────
+const MQTT_HOST   = "60bade7c84b848c3b1ff035a19f5613f.s1.eu.hivemq.cloud";
+const MQTT_PORT   = 8884;   // WebSocket TLS
+const MQTT_USER   = "nonstresstest";
+const MQTT_PASS   = "Nonstresstest2026";
+const TOPIC_FHR   = "nst/fhr";
+const TOPIC_TOCO  = "nst/toco";
+
+// ── Konstanta skala kertas NST ──────────────────────────────
+// ESP32 kirim 1 titik per 5 detik (SEND_INTERVAL = 5000ms)
+const DATA_INTERVAL_S = 0.5;  // detik per titik data dari ESP32 (kirim tiap ~500ms)
+// Kecepatan kertas: 1 cm/menit (standar NST)
+// Di layar: 1 menit = 84px  →  10 detik = 14px (kotak kecil)
+const PX_PER_MIN  = 84;                      // piksel per menit (kecepatan kertas)
+const PX_PER_SEC  = PX_PER_MIN / 60;         // piksel per detik
+const PX_PER_PT   = PX_PER_SEC * DATA_INTERVAL_S;  // piksel per titik data (~7px)
+const PTS_PER_MAJOR = Math.round(60 / DATA_INTERVAL_S); // titik per 1 menit = 120
+
+// ── Error Boundary — mencegah white screen saat runtime error ──
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { hasError: false, error: null }; }
+  static getDerivedStateFromError(error) { return { hasError: true, error }; }
+  componentDidCatch(error, info) { console.error("[ErrorBoundary]", error, info); }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{padding:40, fontFamily:"monospace", color:"#b91c1c", background:"#fff1f2",
+          minHeight:"100vh", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center"}}>
+          <div style={{fontSize:40, marginBottom:16}}>⚠️</div>
+          <div style={{fontSize:18, fontWeight:700, marginBottom:12}}>Terjadi Error</div>
+          <div style={{fontSize:12, color:"#64748b", maxWidth:600, textAlign:"center", marginBottom:20}}>
+            {String(this.state.error)}
+          </div>
+          <button onClick={() => window.location.reload()}
+            style={{padding:"10px 24px", background:"#f43f5e", border:"none", borderRadius:8,
+              color:"#fff", fontWeight:700, cursor:"pointer", fontSize:14}}>
+            🔄 Refresh Halaman
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// ── Utilities ────────────────────────────────────────────────────
+const F = "'Nunito', sans-serif";
+const M = "'DM Mono', monospace";
+const KEMENKES_LOGO = "./logo_kemenkes.png"; // Letakkan file logo di folder yang sama
+
+
+// Klasifikasi status — sama persis dengan fungsi di ESP32 / LCD
+const sBPM = b => {
+  if (!b || b <= 0)   return "NoSignal";
+  if (b < 110)        return "Bradikardi";
+  if (b < 119)        return "Waspada";
+  if (b <= 160)       return "Normal";
+  return "Takikardi";
+};
+const sTOCO = t => {
+  if (t === null || t === undefined) return "-";
+  if (t < 5)   return "Tidak Ada/BH";
+  if (t < 25)  return "Hipotonik";
+  if (t < 80)  return "Normal";
+  return "Hipertonik";
+};
+// Helper: apakah status tergolong aman/normal
+const isBPMNormal  = b => sBPM(b)  === "Normal";
+const isTOCONormal = t => sTOCO(t) === "Normal";
+
+function fmtDate(str) {
+  if (!str) return "-";
+  const d = new Date(str.replace(" ", "T"));
+  return d.toLocaleDateString("id-ID", { day:"2-digit", month:"short", year:"numeric" });
+}
+function fmtDatePDF(str) {
+  if (!str) return "-";
+  const d = new Date((str + " 00:00:00").replace(" ", "T"));
+  return d.toLocaleDateString("id-ID", { day:"2-digit", month:"long", year:"numeric" });
+}
+function fmtTime(str) {
+  if (!str) return "-";
+  const d = new Date(str.replace(" ", "T"));
+  return d.toLocaleTimeString("id-ID", { hour:"2-digit", minute:"2-digit" });
+}
+
+// ── CTG Canvas (Live) ─────────────────────────────────────────────
+const CTGCanvas = React.forwardRef(function CTGCanvas({ bH, tH, bmIdxs, h = 310 }, fwdRef) {
+  const ref = fwdRef || useRef(null);
+
+  useEffect(() => {
+    const c = ref.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    const W = c.width, H = c.height;
+
+    // ── Layout margins ──
+    const PL = 54, PB = 40, PT = 8, PR = 10;
+    const GAP = 22;
+    const GW = W - PL - PR;
+    const GH = H - PT - PB;
+    const splitY = PT + GH / 2;
+    const bpmY0  = PT;
+    const bpmY1  = splitY - GAP / 2;
+    const tocoY0 = splitY + GAP / 2;
+    const tocoY1 = H - PB;
+    const bpmYH  = bpmY1  - bpmY0  - 6;
+    const tocoYH = tocoY1 - tocoY0 - 6;
+    // Skala NST standar: BPM 30–240, TOCO 0–100
+    const bpmMn = 30, bpmMx = 240, tocoMn = 0, tocoMx = 100;
+
+    // ── Posisi X tiap titik data (strip chart: data terbaru di KANAN) ──
+    const n = bH.length;
+    const xOf = i => (PL + GW) - (n - 1 - i) * PX_PER_PT;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // ── Background kertas CTG — krem/putih seperti kertas asli ──
+    ctx.fillStyle = "#fdf6ec"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#fdf0e8"; ctx.fillRect(PL, bpmY0, GW, bpmY1 - bpmY0);
+    ctx.fillStyle = "#f0f0f0"; ctx.fillRect(PL, bpmY1, GW, GAP);
+    ctx.fillStyle = "#fdf0e8"; ctx.fillRect(PL, tocoY0, GW, tocoY1 - tocoY0);
+
+    // ── Grid kertas NST — warna coklat/merah muda seperti kertas CTG asli ──
+    const pxMinor  = PX_PER_SEC * 10;
+    const pxMedium = PX_PER_SEC * 30;
+    const pxMajor  = PX_PER_MIN;
+    const xRight = PL + GW;
+
+    const drawNSTGrid = (y0, y1) => {
+      // Garis horizontal minor (tiap 1/8 tinggi zona) — coklat muda
+      ctx.lineWidth = 0.5; ctx.strokeStyle = "rgba(180,100,60,0.18)";
+      for (let y = y0; y <= y1; y += (y1 - y0) / 8) {
+        ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(PL + GW, y); ctx.stroke();
+      }
+      // Vertical minor (10s) — coklat sangat muda
+      ctx.strokeStyle = "rgba(180,100,60,0.18)"; ctx.lineWidth = 0.5;
+      for (let x = xRight; x >= PL; x -= pxMinor) {
+        ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
+      }
+      // Vertical medium (30s) — coklat sedang
+      ctx.strokeStyle = "rgba(160,80,40,0.32)"; ctx.lineWidth = 0.7;
+      for (let x = xRight; x >= PL; x -= pxMedium) {
+        ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
+      }
+      // Vertical major (1 menit) — coklat tegas
+      ctx.strokeStyle = "rgba(140,60,20,0.55)"; ctx.lineWidth = 1.2;
+      for (let x = xRight; x >= PL; x -= pxMajor) {
+        ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
+      }
+    };
+    drawNSTGrid(bpmY0,  bpmY1);
+    drawNSTGrid(tocoY0, tocoY1);
+
+    // ── Garis sumbu ──
+    ctx.strokeStyle = "rgba(120,70,30,0.4)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(PL, bpmY0); ctx.lineTo(PL, tocoY1); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(PL, tocoY1); ctx.lineTo(PL+GW, tocoY1); ctx.stroke();
+    ctx.strokeStyle = "rgba(140,60,20,0.3)"; ctx.lineWidth = 0.8;
+    ctx.beginPath(); ctx.moveTo(PL, bpmY1); ctx.lineTo(PL+GW, bpmY1); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(PL, tocoY0); ctx.lineTo(PL+GW, tocoY0); ctx.stroke();
+
+    // ── Label sumbu Y (BPM) — standar NST: 30,60,90..240 ──
+    ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    ctx.font = "10px 'DM Mono', monospace";
+    for (let v = 30; v <= 240; v += 30) {
+      const y = bpmY1 - 6 - ((v - bpmMn)/(bpmMx - bpmMn)) * bpmYH;
+      if (y < bpmY0 || y > bpmY1) continue;
+      ctx.fillStyle = "rgba(120,60,20,0.85)";
+      ctx.fillText(v, PL - 6, y);
+      ctx.strokeStyle = "rgba(140,60,20,0.3)"; ctx.lineWidth = 0.8;
+      ctx.beginPath(); ctx.moveTo(PL-3,y); ctx.lineTo(PL,y); ctx.stroke();
+    }
+    // Zona normal BPM (110–160) — hijau transparan
+    const yBpm110 = bpmY1 - 6 - ((110-bpmMn)/(bpmMx-bpmMn)) * bpmYH;
+    const yBpm160 = bpmY1 - 6 - ((160-bpmMn)/(bpmMx-bpmMn)) * bpmYH;
+    ctx.fillStyle = "rgba(134,239,172,0.18)";
+    ctx.fillRect(PL, yBpm160, GW, yBpm110 - yBpm160);
+
+    // ── Label sumbu Y (TOCO) — 0,20,40,60,80,100 ──
+    [0, 20, 40, 60, 80, 100].forEach(v => {
+      const y = tocoY1 - 6 - ((v-tocoMn)/(tocoMx-tocoMn)) * tocoYH;
+      ctx.fillStyle = "rgba(120,60,20,0.85)";
+      ctx.fillText(v, PL-6, y);
+      ctx.strokeStyle = "rgba(140,60,20,0.3)"; ctx.lineWidth = 0.8;
+      ctx.beginPath(); ctx.moveTo(PL-3,y); ctx.lineTo(PL,y); ctx.stroke();
+    });
+
+    // ── Label sumbu X — menit:detik, label tiap 1 menit anchored ke kanan ──
+    ctx.fillStyle = "#94a3b8"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+    ctx.font = "10px 'DM Mono', monospace";
+    // Label setiap pxMajor (1 menit), dari kanan ke kiri
+    for (let x = xRight; x >= PL + pxMajor; x -= pxMajor) {
+      const secAgo = Math.round((xRight - x) / PX_PER_SEC);
+      const m = Math.floor(secAgo / 60), s = secAgo % 60;
+      const lbl = `-${m}:${String(s).padStart(2,"0")}`;
+      ctx.fillText(lbl, x, tocoY1 + 5);
+      ctx.strokeStyle = "rgba(148,163,184,0.3)"; ctx.lineWidth = 0.7;
+      ctx.beginPath(); ctx.moveTo(x, tocoY1); ctx.lineTo(x, tocoY1 + 3); ctx.stroke();
+    }
+    // Label "Skrg" di ujung kanan — warna hijau agar mencolok
+    ctx.fillStyle = "#16a34a"; ctx.font = "bold 10px 'DM Mono', monospace";
+    ctx.fillText("Skrg", xRight, tocoY1 + 5);
+    // Garis vertikal hijau putus-putus di posisi "Skrg"
+    ctx.strokeStyle = "rgba(22,163,74,0.55)"; ctx.lineWidth = 1.5;
+    ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.moveTo(xRight, bpmY0); ctx.lineTo(xRight, tocoY1); ctx.stroke();
+    ctx.setLineDash([]);
+    // Label arah: masa lalu di kiri, saat ini di kanan
+    ctx.textAlign = "left"; ctx.fillStyle = "#78350f";
+    ctx.font = "bold 9px 'Nunito', sans-serif";
+    ctx.fillText("← masa lalu", PL + 4, tocoY1 + 16);
+    ctx.textAlign = "right"; ctx.fillStyle = "#15803d";
+    ctx.font = "bold 9px 'Nunito', sans-serif";
+    ctx.fillText("saat ini →", xRight - 2, tocoY1 + 16);
+    // Keterangan skala di bawah
+    ctx.textAlign = "left"; ctx.fillStyle = "#94a3b8";
+    ctx.font = "8px 'Nunito', sans-serif";
+    ctx.fillText("10det/kotak · 1mnt/major", PL + 4, tocoY1 + 26);
+
+    // ── Clip area plot agar tidak keluar batas kiri ──
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(PL, bpmY0, GW, tocoY1 - bpmY0);
+    ctx.clip();
+
+    // ── Gradient fill — dengan clipping per zona ──
+    const fill = (data, mn, mx, y0, yh, col, clipY0, clipY1) => {
+      const pts = data.map((v, i) => ({ x: xOf(i), y: y0 + yh - ((v-mn)/(mx-mn))*yh }))
+                      .filter(p => p.x >= PL);
+      if (pts.length < 2) return;
+      ctx.save();
+      ctx.beginPath(); ctx.rect(PL, clipY0, GW, clipY1 - clipY0); ctx.clip();
+      const g = ctx.createLinearGradient(0, y0, 0, y0+yh);
+      g.addColorStop(0, col+"44"); g.addColorStop(1, col+"00");
+      ctx.beginPath();
+      pts.forEach((p,i) => i===0 ? ctx.moveTo(p.x,p.y) : ctx.lineTo(p.x,p.y));
+      ctx.lineTo(pts[pts.length-1].x, y0+yh); ctx.lineTo(pts[0].x, y0+yh);
+      ctx.closePath(); ctx.fillStyle = g; ctx.fill();
+      ctx.restore();
+    };
+    fill(bH, bpmMn, bpmMx, bpmY0+6, bpmYH, "#c0392b", bpmY0, bpmY1);
+    fill(tH, tocoMn, tocoMx, tocoY0+6, tocoYH, "#1a5276", tocoY0, tocoY1);
+
+    // ── Garis utama — dengan clipping per zona ──
+    const line = (data, mn, mx, y0, yh, col, clipY0, clipY1) => {
+      const pts = data.map((v, i) => ({ x: xOf(i), y: y0 + yh - ((v-mn)/(mx-mn))*yh }))
+                      .filter(p => p.x >= PL);
+      if (pts.length < 2) return;
+      ctx.save();
+      ctx.beginPath(); ctx.rect(PL, clipY0, GW, clipY1 - clipY0); ctx.clip();
+      ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.lineJoin = "round";
+      ctx.shadowColor = col; ctx.shadowBlur = 4;
+      ctx.beginPath();
+      pts.forEach((p,i) => i===0 ? ctx.moveTo(p.x,p.y) : ctx.lineTo(p.x,p.y));
+      ctx.stroke(); ctx.shadowBlur = 0;
+      ctx.restore();
+    };
+    line(bH, bpmMn, bpmMx, bpmY0+6, bpmYH, "#c0392b", bpmY0, bpmY1);
+    line(tH, tocoMn, tocoMx, tocoY0+6, tocoYH, "#1a5276", tocoY0, tocoY1);
+
+    ctx.restore(); // end clip
+
+    // ── Bookmark: garis vertikal + titik + label ──
+    // bmIdxs berisi offsetFromRight (0=terbaru, bertambah ke kiri)
+    bmIdxs.forEach(offsetFromRight => {
+      const x = (PL + GW) - offsetFromRight * PX_PER_PT;
+      if (x < PL || x > PL + GW) return;
+
+      // Garis vertikal putus-putus dari atas BPM sampai bawah TOCO
+      ctx.save();
+      ctx.strokeStyle = "rgba(245,158,11,0.55)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(x, bpmY0+2); ctx.lineTo(x, tocoY1-2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      // Titik di tengah gap
+      ctx.beginPath(); ctx.arc(x, splitY, 6, 0, Math.PI*2);
+      ctx.fillStyle = "#f59e0b"; ctx.shadowColor = "#f59e0b"; ctx.shadowBlur = 10;
+      ctx.fill(); ctx.shadowBlur = 0;
+
+      // Segitiga panah ke atas (di zona BPM)
+      ctx.beginPath();
+      ctx.moveTo(x,     bpmY0+14);
+      ctx.lineTo(x - 6, bpmY0+24);
+      ctx.lineTo(x + 6, bpmY0+24);
+      ctx.closePath();
+      ctx.fillStyle = "#f59e0b";
+      ctx.shadowColor = "#f59e0b"; ctx.shadowBlur = 6;
+      ctx.fill(); ctx.shadowBlur = 0;
+
+      // Segitiga panah ke bawah (di zona TOCO)
+      ctx.beginPath();
+      ctx.moveTo(x,     tocoY1-14);
+      ctx.lineTo(x - 6, tocoY1-24);
+      ctx.lineTo(x + 6, tocoY1-24);
+      ctx.closePath();
+      ctx.fillStyle = "#f59e0b";
+      ctx.shadowColor = "#f59e0b"; ctx.shadowBlur = 6;
+      ctx.fill(); ctx.shadowBlur = 0;
+    });
+
+    // ── Label section ──
+    ctx.shadowBlur = 0; ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.font = "bold 11px 'Nunito', sans-serif";
+    ctx.fillStyle = "#c0392b"; ctx.fillText("❤ FHR (bpm)", PL+8, bpmY0+4);
+    ctx.fillStyle = "#1a5276"; ctx.fillText("◈ KONTRAKSI (unit)", PL+8, tocoY0+4);
+
+  }, [bH, tH, bmIdxs]);
+
+  return <canvas ref={ref} width={900} height={h}
+    style={{ width:"100%", height:"100%", borderRadius:8, display:"block" }} />;
+});
+
+// ── CTG Canvas (History) ─────────────────────────────────────────
+// ── Fungsi render canvas CTG — dipakai oleh HistGraph preview & PDF ──
+function renderCTGCanvas(oc, bpmArr, tocoArr, bmIdxs) {
+  const nF  = bpmArr.length;
+  const oPL = 60, oPB = 32, oPT = 10, oPR = 12, oGAP = 24;
+  const oh  = oc.height;
+  const oGW = oc.width - oPL - oPR;
+  const octx = oc.getContext("2d");
+  const oGH = oh - oPT - oPB, oSplitY = oPT + oGH / 2;
+  const oBpmY0 = oPT, oBpmY1 = oSplitY - oGAP / 2;
+  const oTocoY0 = oSplitY + oGAP / 2, oTocoY1 = oh - oPB;
+  const oBpmYH = oBpmY1 - oBpmY0 - 6, oTocoYH = oTocoY1 - oTocoY0 - 6;
+  const bMn = 30, bMx = 240, tMn = 0, tMx = 100;
+  const oxOf = i => oPL + i * PX_PER_PT;
+
+  // Latar
+  octx.fillStyle = "#fffdf7"; octx.fillRect(0, 0, oc.width, oh);
+  octx.fillStyle = "rgba(253,240,232,0.80)"; octx.fillRect(oPL, oBpmY0, oGW, oBpmY1 - oBpmY0);
+  octx.fillStyle = "rgba(240,240,240,0.90)"; octx.fillRect(oPL, oBpmY1, oGW, oGAP);
+  octx.fillStyle = "rgba(240,248,255,0.80)"; octx.fillRect(oPL, oTocoY0, oGW, oTocoY1 - oTocoY0);
+
+  // Grid NST (kertas CTG) — fixed pixel
+  const pxMin = PX_PER_SEC * 10, pxMed = PX_PER_SEC * 30, pxMaj = PX_PER_MIN;
+  const drawGrid = (y0, y1, cMin, cMed, cMaj) => {
+    octx.lineWidth = 0.5; octx.strokeStyle = cMin;
+    for (let y = y0; y <= y1; y += (y1 - y0) / 8) { octx.beginPath(); octx.moveTo(oPL, y); octx.lineTo(oPL + oGW, y); octx.stroke(); }
+    for (let x = oPL; x <= oPL + oGW; x += pxMin)  { octx.beginPath(); octx.moveTo(x, y0); octx.lineTo(x, y1); octx.stroke(); }
+    octx.strokeStyle = cMed; octx.lineWidth = 0.8;
+    for (let x = oPL; x <= oPL + oGW; x += pxMed)  { octx.beginPath(); octx.moveTo(x, y0); octx.lineTo(x, y1); octx.stroke(); }
+    octx.strokeStyle = cMaj; octx.lineWidth = 1.5;
+    for (let x = oPL; x <= oPL + oGW; x += pxMaj)  { octx.beginPath(); octx.moveTo(x, y0); octx.lineTo(x, y1); octx.stroke(); }
+  };
+  drawGrid(oBpmY0, oBpmY1,  "rgba(180,100,60,0.18)", "rgba(160,80,40,0.32)",  "rgba(140,60,20,0.55)");
+  drawGrid(oTocoY0, oTocoY1,"rgba(80,170,220,0.14)", "rgba(40,130,200,0.25)", "rgba(10,90,170,0.38)");
+
+  // Garis sumbu
+  octx.strokeStyle = "rgba(120,70,30,0.45)"; octx.lineWidth = 1;
+  octx.beginPath(); octx.moveTo(oPL, oBpmY0); octx.lineTo(oPL, oTocoY1); octx.stroke();
+  octx.beginPath(); octx.moveTo(oPL, oTocoY1); octx.lineTo(oPL + oGW, oTocoY1); octx.stroke();
+  octx.strokeStyle = "rgba(140,60,20,0.3)"; octx.lineWidth = 0.8;
+  octx.beginPath(); octx.moveTo(oPL, oBpmY1);  octx.lineTo(oPL + oGW, oBpmY1);  octx.stroke();
+  octx.beginPath(); octx.moveTo(oPL, oTocoY0); octx.lineTo(oPL + oGW, oTocoY0); octx.stroke();
+
+  // Label Y BPM
+  octx.textAlign = "right"; octx.textBaseline = "middle"; octx.font = "12px monospace";
+  for (let v = 30; v <= 240; v += 30) {
+    const py = oBpmY1 - 6 - ((v - bMn) / (bMx - bMn)) * oBpmYH;
+    if (py < oBpmY0 || py > oBpmY1) continue;
+    octx.fillStyle = "rgba(192,57,43,0.85)"; octx.fillText(v, oPL - 6, py);
+  }
+  // Label Y TOCO
+  [0, 20, 40, 60, 80, 100].forEach(v => {
+    const py = oTocoY1 - 6 - ((v - tMn) / (tMx - tMn)) * oTocoYH;
+    octx.fillStyle = "rgba(26,82,118,0.85)"; octx.fillText(v, oPL - 6, py);
+  });
+
+  // Zona normal BPM hijau
+  const yB110 = oBpmY1 - 6 - ((110 - bMn) / (bMx - bMn)) * oBpmYH;
+  const yB160 = oBpmY1 - 6 - ((160 - bMn) / (bMx - bMn)) * oBpmYH;
+  octx.fillStyle = "rgba(134,239,172,0.18)"; octx.fillRect(oPL, yB160, oGW, yB110 - yB160);
+
+  // Label X — tiap menit, skala nyata
+  octx.fillStyle = "rgba(120,60,20,0.7)"; octx.textAlign = "center"; octx.textBaseline = "top"; octx.font = "11px monospace";
+  for (let x = oPL; x <= oPL + oGW; x += pxMaj) {
+    const sec = Math.round((x - oPL) / PX_PER_SEC);
+    const m = Math.floor(sec / 60), s = sec % 60;
+    octx.fillText(`${m}:${String(s).padStart(2,"0")}`, x, oTocoY1 + 5);
+    octx.strokeStyle = "rgba(140,60,20,0.3)"; octx.lineWidth = 0.7;
+    octx.beginPath(); octx.moveTo(x, oTocoY1); octx.lineTo(x, oTocoY1 + 3); octx.stroke();
+  }
+  octx.textAlign = "right"; octx.fillStyle = "rgba(120,60,20,0.5)"; octx.font = "10px sans-serif";
+  octx.fillText("Waktu →", oPL + oGW, oTocoY1 + 18);
+
+  // Fill + Line — dengan clipping per zona agar tidak tembus batas
+  const oFill = (arr, mn, mx, y0, yh, col, clipY0, clipY1) => {
+    if (!arr || arr.length < 2) return;
+    octx.save();
+    octx.beginPath(); octx.rect(oPL, clipY0, oGW, clipY1 - clipY0); octx.clip();
+    const g = octx.createLinearGradient(0, y0, 0, y0 + yh);
+    g.addColorStop(0, col + "44"); g.addColorStop(1, col + "00");
+    octx.beginPath();
+    arr.forEach((v, i) => { const x = oxOf(i); const py = y0 + yh - ((v - mn) / (mx - mn)) * yh; i === 0 ? octx.moveTo(x, py) : octx.lineTo(x, py); });
+    octx.lineTo(oxOf(arr.length - 1), y0 + yh); octx.lineTo(oPL, y0 + yh); octx.closePath();
+    octx.fillStyle = g; octx.fill();
+    octx.restore();
+  };
+  const oLine = (arr, mn, mx, y0, yh, col, clipY0, clipY1) => {
+    if (!arr || arr.length < 2) return;
+    octx.save();
+    octx.beginPath(); octx.rect(oPL, clipY0, oGW, clipY1 - clipY0); octx.clip();
+    octx.strokeStyle = col; octx.lineWidth = 2.5; octx.lineJoin = "round";
+    octx.shadowColor = col; octx.shadowBlur = 5;
+    octx.beginPath();
+    arr.forEach((v, i) => { const x = oxOf(i); const py = y0 + yh - ((v - mn) / (mx - mn)) * yh; i === 0 ? octx.moveTo(x, py) : octx.lineTo(x, py); });
+    octx.stroke(); octx.shadowBlur = 0;
+    octx.restore();
+  };
+
+  oFill(bpmArr,  bMn, bMx, oBpmY0 + 6,  oBpmYH,  "#c0392b", oBpmY0, oBpmY1);
+  oFill(tocoArr, tMn, tMx, oTocoY0 + 6, oTocoYH, "#1a5276", oTocoY0, oTocoY1);
+  oLine(bpmArr,  bMn, bMx, oBpmY0 + 6,  oBpmYH,  "#c0392b", oBpmY0, oBpmY1);
+  oLine(tocoArr, tMn, tMx, oTocoY0 + 6, oTocoYH, "#1a5276", oTocoY0, oTocoY1);
+
+  // Bookmark
+  (bmIdxs || []).forEach(idx => {
+    if (idx >= bpmArr.length) return;
+    const x = oxOf(idx);
+    octx.save(); octx.strokeStyle = "rgba(245,158,11,0.6)"; octx.lineWidth = 1.5; octx.setLineDash([4, 4]);
+    octx.beginPath(); octx.moveTo(x, oBpmY0 + 2); octx.lineTo(x, oTocoY1 - 2); octx.stroke();
+    octx.setLineDash([]); octx.restore();
+    octx.beginPath(); octx.arc(x, oSplitY, 6, 0, Math.PI * 2);
+    octx.fillStyle = "#f59e0b"; octx.shadowColor = "#f59e0b"; octx.shadowBlur = 8; octx.fill(); octx.shadowBlur = 0;
+    // Segitiga atas
+    octx.beginPath(); octx.moveTo(x, oBpmY0+14); octx.lineTo(x-6, oBpmY0+24); octx.lineTo(x+6, oBpmY0+24); octx.closePath();
+    octx.fillStyle = "#f59e0b"; octx.shadowColor = "#f59e0b"; octx.shadowBlur = 6; octx.fill(); octx.shadowBlur = 0;
+    // Segitiga bawah
+    octx.beginPath(); octx.moveTo(x, oTocoY1-14); octx.lineTo(x-6, oTocoY1-24); octx.lineTo(x+6, oTocoY1-24); octx.closePath();
+    octx.fillStyle = "#f59e0b"; octx.shadowColor = "#f59e0b"; octx.shadowBlur = 6; octx.fill(); octx.shadowBlur = 0;
+  });
+
+  // Label section
+  octx.shadowBlur = 0; octx.textAlign = "left"; octx.textBaseline = "top"; octx.font = "bold 13px sans-serif";
+  octx.fillStyle = "#c0392b"; octx.fillText("❤ FHR (bpm)", oPL + 8, oBpmY0 + 4);
+  octx.fillStyle = "#1a5276"; octx.fillText("◈ KONTRAKSI (unit)", oPL + 8, oTocoY0 + 4);
+}
+
+// ══ FUNGSI PDF TERPADU — dipakai oleh savePDF (riwayat) & exportPDF (live) ══
+// params: { bpmArr, tocoArr, bmIdxs, durSec, avgBpm, avgToco,
+//           namaP, rmP, usiaP, catatanP, tglSesi, jamSesi, durStr, bmStr, namaFile }
+function generateNSTPDF(p) {
+  const { jsPDF } = window.jspdf;
+  if (!jsPDF) { alert("Library PDF belum siap."); return; }
+
+  const doc = new jsPDF({ orientation:"landscape", unit:"mm", format:"a4" });
+  const W=297, H=210, ML=10, MR=10, PW=W-ML-MR;
+  const C = {
+    tealDark:[14,116,144], teal:[8,145,178], tealLight:[207,250,254],
+    green:[22,163,74], greenLight:[220,252,231],
+    red:[185,28,28], redLight:[254,226,226],
+    slate:[30,41,59], muted:[100,116,139],
+    border:[186,230,253],
+  };
+
+  // ── HEADER ──
+  doc.setFillColor(...C.tealDark); doc.rect(0,0,W,22,"F");
+  doc.setFillColor(255,255,255); doc.rect(0,21.5,W,0.5,"F");
+  doc.setFillColor(255,255,255); doc.roundedRect(5,3,16,16,2,2,"F");
+  try { doc.addImage(KEMENKES_LOGO,"PNG",5.5,3.5,15,15); } catch(e){}
+  doc.setFontSize(13); doc.setFont("helvetica","bold"); doc.setTextColor(255,255,255);
+  doc.text("Laporan Pemeriksaan Non-Stress Test",26,10);
+  doc.setFontSize(6.5); doc.setFont("helvetica","normal"); doc.setTextColor(207,250,254);
+  doc.text("Kementerian Kesehatan RI  |  Sistem Pemantauan Kardiotokografi (CTG) Digital",26,17);
+  const now = new Date();
+  const tglCetak = now.toLocaleDateString("id-ID",{day:"2-digit",month:"long",year:"numeric"});
+  const jamCetak = now.toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit"});
+  doc.setFillColor(255,255,255); doc.roundedRect(W-MR-52,3,52,16,2,2,"F");
+  doc.setFontSize(5); doc.setFont("helvetica","normal"); doc.setTextColor(...C.muted);
+  doc.text("Dicetak pada:",W-MR-26,7.5,{align:"center"});
+  doc.setFontSize(8); doc.setFont("helvetica","bold"); doc.setTextColor(...C.tealDark);
+  doc.text(tglCetak,W-MR-26,13,{align:"center"});
+  doc.setFontSize(6.5); doc.setFont("helvetica","normal"); doc.setTextColor(...C.teal);
+  doc.text("Pukul "+jamCetak,W-MR-26,17.5,{align:"center"});
+
+  let y=30;
+  const leftW=PW*0.58, boxH=16;
+
+  // ── IDENTITAS PASIEN ──
+  doc.setFillColor(...C.border); doc.roundedRect(ML+0.8,y+0.8,leftW,boxH,2,2,"F");
+  doc.setFillColor(240,253,255); doc.setDrawColor(...C.teal); doc.setLineWidth(0.5);
+  doc.roundedRect(ML,y,leftW,boxH,2,2,"FD");
+  doc.setFillColor(...C.tealDark); doc.roundedRect(ML,y,4,boxH,1,1,"F");
+  doc.roundedRect(ML+6,y-4.5,40,7,1.5,1.5,"F");
+  doc.setFontSize(5.5); doc.setFont("helvetica","bold"); doc.setTextColor(255,255,255);
+  doc.text("IDENTITAS PASIEN",ML+26,y+0.5,{align:"center"});
+  [{l:"Nama Pasien",v:p.namaP,big:true},{l:"No. Rekam Medis",v:p.rmP},{l:"Usia Kehamilan",v:p.usiaP}].forEach((col,i)=>{
+    const cx=ML+6+i*(leftW/3);
+    if(i>0){doc.setDrawColor(...C.border);doc.setLineWidth(0.3);doc.line(ML+i*(leftW/3),y+3.5,ML+i*(leftW/3),y+boxH-1);}
+    doc.setFontSize(5);doc.setFont("helvetica","normal");doc.setTextColor(...C.muted);doc.text(col.l.toUpperCase(),cx,y+6);
+    doc.setFontSize(col.big?9:7.5);doc.setFont("helvetica","bold");doc.setTextColor(...C.slate);doc.text(String(col.v),cx,y+13.5);
+  });
+
+  // ── DATA SESI ──
+  const rightX=ML+leftW+5, rightW=PW-leftW-5;
+  doc.setFillColor(...C.border); doc.roundedRect(rightX+0.8,y+0.8,rightW,boxH,2,2,"F");
+  doc.setFillColor(240,253,255); doc.setDrawColor(...C.teal); doc.setLineWidth(0.5);
+  doc.roundedRect(rightX,y,rightW,boxH,2,2,"FD");
+  doc.setFillColor(...C.tealDark); doc.roundedRect(rightX,y,4,boxH,1,1,"F");
+  doc.roundedRect(rightX+6,y-4.5,28,7,1.5,1.5,"F");
+  doc.setFontSize(5.5);doc.setFont("helvetica","bold");doc.setTextColor(255,255,255);
+  doc.text("DATA SESI",rightX+20,y+0.5,{align:"center"});
+  [{l:"Tanggal",v:p.tglSesi},{l:"Jam",v:p.jamSesi},{l:"Durasi",v:p.durStr},{l:"Bookmark",v:p.bmStr}].forEach((col,i)=>{
+    const cx=rightX+6+i*(rightW/4);
+    if(i>0){doc.setDrawColor(...C.border);doc.setLineWidth(0.3);doc.line(rightX+i*(rightW/4),y+3.5,rightX+i*(rightW/4),y+boxH-1);}
+    doc.setFontSize(5);doc.setFont("helvetica","normal");doc.setTextColor(...C.muted);doc.text(col.l.toUpperCase(),cx,y+6);
+    doc.setFontSize(7.5);doc.setFont("helvetica","bold");doc.setTextColor(...C.slate);doc.text(String(col.v),cx,y+13.5);
+  });
+  y+=boxH+5;
+
+  // ── STATISTIK ──
+  const statsH=19, statW=PW/2;
+  const bpmOk  = p.avgBpm  !== null && p.avgBpm  >= 110 && p.avgBpm  <= 160;
+  const tocoOk = p.avgToco !== null && p.avgToco <= 80;
+  const drawStat=(x,w,label,val,unit,ok)=>{
+    const col=ok?[...C.green]:[194,65,12];
+    const bg =ok?[...C.greenLight]:[255,247,237];
+    const bd =ok?[134,239,172]:[253,186,116];
+    doc.setFillColor(...bd);doc.roundedRect(x+0.7,y+0.7,w-3,statsH,2,2,"F");
+    doc.setFillColor(...bg);doc.setDrawColor(...bd);doc.setLineWidth(0.5);doc.roundedRect(x,y,w-3,statsH,2,2,"FD");
+    doc.setFillColor(...col);doc.roundedRect(x,y,4,statsH,1,1,"F");
+    doc.setFontSize(5.5);doc.setFont("helvetica","normal");doc.setTextColor(...C.muted);doc.text(label,x+7,y+5.5);
+    doc.setFontSize(16);doc.setFont("helvetica","bold");doc.setTextColor(...col);
+    doc.text(val!==null?String(val)+unit:"-",x+7,y+14);
+    doc.setFontSize(5.5);doc.setFont("helvetica","normal");doc.setTextColor(...C.muted);
+    doc.text(ok?(unit==="bpm"?"Normal (110-160 bpm)":"Normal (<80 unit)"):"Di luar rentang normal",x+7,y+17.5);
+  };
+  drawStat(ML,       statW,"RATA-RATA DETAK JANTUNG JANIN",p.avgBpm, " bpm", bpmOk);
+  drawStat(ML+statW, statW,"RATA-RATA TEKANAN KONTRAKSI",  p.avgToco," unit",tocoOk);
+  y+=statsH+4;
+
+  // ── LABEL GRAFIK CTG ──
+  doc.setFillColor(...C.tealDark); doc.roundedRect(ML,y,36,6,1.5,1.5,"F");
+  doc.setFontSize(5.5);doc.setFont("helvetica","bold");doc.setTextColor(255,255,255);
+  doc.text("GRAFIK CTG",ML+18,y+4,{align:"center"});
+  doc.setDrawColor(...C.teal);doc.setLineWidth(0.4);doc.line(ML+36,y+3,ML+PW,y+3);
+  y+=7;
+  const grafikH=H-y-10;
+
+  // ── RENDER CANVAS GRAFIK ──
+  try {
+    const {bpmArr,tocoArr,bmIdxs,durSec} = p;
+    const nF=bpmArr.length;
+    const oPL=60,oPB=32,oPT=10,oPR=12,oGAP=24,oh=520;
+
+    // ── Lebar canvas SEMATA-MATA dari durasi (kecepatan kertas standar CTG) ──
+    // Tidak lagi tergantung jumlah titik (nF), supaya PDF dari Live & Riwayat
+    // identik untuk durasi yang sama, terlepas berapa kali sampling dilakukan.
+    // Minimum 900 px agar layout tetap nyaman dibaca untuk sesi sangat singkat.
+    const oGW = durSec > 0
+      ? Math.max(Math.round(durSec * PX_PER_SEC), 900-oPL-oPR)
+      : Math.max(900-oPL-oPR, nF*PX_PER_PT);
+    const ow=oGW+oPL+oPR;
+    const oc=document.createElement("canvas");
+    oc.width=ow; oc.height=oh;
+    const octx=oc.getContext("2d");
+
+    const oGH=oh-oPT-oPB, oSplitY=oPT+oGH/2;
+    const oBpmY0=oPT, oBpmY1=oSplitY-oGAP/2;
+    const oTocoY0=oSplitY+oGAP/2, oTocoY1=oh-oPB;
+    const oBpmYH=oBpmY1-oBpmY0-6, oTocoYH=oTocoY1-oTocoY0-6;
+    const bMn=30,bMx=240,tMn=0,tMx=100;
+    // ── Distribusi titik MERATA sepanjang oGW (waktu nyata), bukan per-pixel-titik ──
+    // Titik ke-i diposisikan di waktu (i / (nF-1)) * durSec dari awal.
+    const oxOf = i => {
+      if (nF <= 1) return oPL;
+      const ratio = i / (nF - 1);
+      return oPL + ratio * oGW;
+    };
+
+    // Latar
+    octx.fillStyle="#fffdf7"; octx.fillRect(0,0,ow,oh);
+    octx.fillStyle="rgba(253,240,232,0.80)"; octx.fillRect(oPL,oBpmY0,oGW,oBpmY1-oBpmY0);
+    octx.fillStyle="rgba(240,240,240,0.90)"; octx.fillRect(oPL,oBpmY1,oGW,oGAP);
+    octx.fillStyle="rgba(240,248,255,0.80)"; octx.fillRect(oPL,oTocoY0,oGW,oTocoY1-oTocoY0);
+
+    // Grid NST
+    const pxMin=PX_PER_SEC*10, pxMed=PX_PER_SEC*30, pxMaj=PX_PER_MIN;
+    const dG=(y0,y1,c1,c2,c3)=>{
+      octx.lineWidth=0.5; octx.strokeStyle=c1;
+      for(let y=y0;y<=y1;y+=(y1-y0)/8){octx.beginPath();octx.moveTo(oPL,y);octx.lineTo(oPL+oGW,y);octx.stroke();}
+      for(let x=oPL;x<=oPL+oGW;x+=pxMin){octx.beginPath();octx.moveTo(x,y0);octx.lineTo(x,y1);octx.stroke();}
+      octx.strokeStyle=c2; octx.lineWidth=0.8;
+      for(let x=oPL;x<=oPL+oGW;x+=pxMed){octx.beginPath();octx.moveTo(x,y0);octx.lineTo(x,y1);octx.stroke();}
+      octx.strokeStyle=c3; octx.lineWidth=1.5;
+      for(let x=oPL;x<=oPL+oGW;x+=pxMaj){octx.beginPath();octx.moveTo(x,y0);octx.lineTo(x,y1);octx.stroke();}
+    };
+    dG(oBpmY0,oBpmY1,"rgba(180,100,60,0.18)","rgba(160,80,40,0.32)","rgba(140,60,20,0.55)");
+    dG(oTocoY0,oTocoY1,"rgba(80,170,220,0.14)","rgba(40,130,200,0.25)","rgba(10,90,170,0.38)");
+
+    // Sumbu
+    octx.strokeStyle="rgba(120,70,30,0.45)"; octx.lineWidth=1;
+    octx.beginPath();octx.moveTo(oPL,oBpmY0);octx.lineTo(oPL,oTocoY1);octx.stroke();
+    octx.beginPath();octx.moveTo(oPL,oTocoY1);octx.lineTo(oPL+oGW,oTocoY1);octx.stroke();
+    octx.strokeStyle="rgba(140,60,20,0.3)"; octx.lineWidth=0.8;
+    octx.beginPath();octx.moveTo(oPL,oBpmY1);octx.lineTo(oPL+oGW,oBpmY1);octx.stroke();
+    octx.beginPath();octx.moveTo(oPL,oTocoY0);octx.lineTo(oPL+oGW,oTocoY0);octx.stroke();
+
+    // Label Y
+    octx.textAlign="right"; octx.textBaseline="middle"; octx.font="12px monospace";
+    for(let v=30;v<=240;v+=30){
+      const py=oBpmY1-6-((v-bMn)/(bMx-bMn))*oBpmYH;
+      if(py<oBpmY0||py>oBpmY1)continue;
+      octx.fillStyle="rgba(192,57,43,0.85)"; octx.fillText(v,oPL-6,py);
+    }
+    [0,20,40,60,80,100].forEach(v=>{
+      const py=oTocoY1-6-((v-tMn)/(tMx-tMn))*oTocoYH;
+      octx.fillStyle="rgba(26,82,118,0.85)"; octx.fillText(v,oPL-6,py);
+    });
+
+    // Zona normal BPM
+    const yB110=oBpmY1-6-((110-bMn)/(bMx-bMn))*oBpmYH, yB160=oBpmY1-6-((160-bMn)/(bMx-bMn))*oBpmYH;
+    octx.fillStyle="rgba(134,239,172,0.18)"; octx.fillRect(oPL,yB160,oGW,yB110-yB160);
+
+    // Label X — presisi dari durSec (detik nyata) dibagi jumlah titik
+    const actualIvl = (nF > 1 && durSec > 0) ? durSec/(nF-1) : DATA_INTERVAL_S;
+    const ptsMaj    = Math.max(1, Math.round(60/actualIvl));
+    octx.fillStyle="rgba(120,60,20,0.7)"; octx.textAlign="center"; octx.textBaseline="top"; octx.font="11px monospace";
+    if(nF>1){
+      for(let i=0;i<nF;i+=ptsMaj){
+        const x=oxOf(i);
+        const elSec=Math.round(i*actualIvl);
+        const m=Math.floor(elSec/60), s=elSec%60;
+        octx.fillText(`${m}:${String(s).padStart(2,"0")}`,x,oTocoY1+5);
+        octx.strokeStyle="rgba(140,60,20,0.3)"; octx.lineWidth=0.7;
+        octx.beginPath();octx.moveTo(x,oTocoY1);octx.lineTo(x,oTocoY1+3);octx.stroke();
+      }
+    }
+    octx.textAlign="right"; octx.fillStyle="rgba(120,60,20,0.5)"; octx.font="10px sans-serif";
+    octx.fillText("Waktu →",oPL+oGW,oTocoY1+18);
+
+    // Fill + Line — dengan clipping per zona agar tidak tembus batas
+    const oFill=(arr,mn,mx,y0,yh,col,clipY0,clipY1)=>{
+      if(!arr||arr.length<2)return;
+      octx.save();
+      octx.beginPath();octx.rect(oPL,clipY0,oGW,clipY1-clipY0);octx.clip();
+      const g=octx.createLinearGradient(0,y0,0,y0+yh);
+      g.addColorStop(0,col+"44"); g.addColorStop(1,col+"00");
+      octx.beginPath();
+      arr.forEach((v,i)=>{const x=oxOf(i);const py=y0+yh-((v-mn)/(mx-mn))*yh;i===0?octx.moveTo(x,py):octx.lineTo(x,py);});
+      octx.lineTo(oxOf(arr.length-1),y0+yh);octx.lineTo(oPL,y0+yh);octx.closePath();
+      octx.fillStyle=g;octx.fill();
+      octx.restore();
+    };
+    const oLine=(arr,mn,mx,y0,yh,col,clipY0,clipY1)=>{
+      if(!arr||arr.length<2)return;
+      octx.save();
+      octx.beginPath();octx.rect(oPL,clipY0,oGW,clipY1-clipY0);octx.clip();
+      octx.strokeStyle=col;octx.lineWidth=2.5;octx.lineJoin="round";
+      octx.shadowColor=col;octx.shadowBlur=5;
+      octx.beginPath();
+      arr.forEach((v,i)=>{const x=oxOf(i);const py=y0+yh-((v-mn)/(mx-mn))*yh;i===0?octx.moveTo(x,py):octx.lineTo(x,py);});
+      octx.stroke();octx.shadowBlur=0;
+      octx.restore();
+    };
+    oFill(bpmArr, bMn,bMx,oBpmY0+6, oBpmYH, "#c0392b", oBpmY0, oBpmY1);
+    oFill(tocoArr,tMn,tMx,oTocoY0+6,oTocoYH,"#1a5276", oTocoY0, oTocoY1);
+    oLine(bpmArr, bMn,bMx,oBpmY0+6, oBpmYH, "#c0392b", oBpmY0, oBpmY1);
+    oLine(tocoArr,tMn,tMx,oTocoY0+6,oTocoYH,"#1a5276", oTocoY0, oTocoY1);
+
+    // Bookmark
+    (bmIdxs||[]).forEach(idx=>{
+      if(idx>=bpmArr.length)return;
+      const x=oxOf(idx);
+      octx.save();octx.strokeStyle="rgba(245,158,11,0.6)";octx.lineWidth=1.5;octx.setLineDash([4,4]);
+      octx.beginPath();octx.moveTo(x,oBpmY0+2);octx.lineTo(x,oTocoY1-2);octx.stroke();
+      octx.setLineDash([]);octx.restore();
+      octx.beginPath();octx.arc(x,oSplitY,6,0,Math.PI*2);
+      octx.fillStyle="#f59e0b";octx.shadowColor="#f59e0b";octx.shadowBlur=8;octx.fill();octx.shadowBlur=0;
+      const tri=(ax,ay,up)=>{octx.beginPath();octx.moveTo(ax,ay);up?octx.lineTo(ax-6,ay+12):octx.lineTo(ax-6,ay-12);up?octx.lineTo(ax+6,ay+12):octx.lineTo(ax+6,ay-12);octx.closePath();octx.fillStyle="#f59e0b";octx.fill();};
+      tri(x,oBpmY0+14,true);tri(x,oTocoY1-14,false);
+    });
+
+    // Label section
+    octx.shadowBlur=0;octx.textAlign="left";octx.textBaseline="top";octx.font="bold 13px sans-serif";
+    octx.fillStyle="#c0392b";octx.fillText("❤ FHR (bpm)",oPL+8,oBpmY0+4);
+    octx.fillStyle="#1a5276";octx.fillText("◈ KONTRAKSI (unit)",oPL+8,oTocoY0+4);
+
+    // Masukkan ke PDF
+    doc.setFillColor(...C.border);doc.roundedRect(ML+1,y+1,PW,grafikH,2,2,"F");
+    doc.setFillColor(253,248,244);doc.setDrawColor(...C.teal);doc.setLineWidth(0.5);
+    doc.roundedRect(ML,y,PW,grafikH,2,2,"FD");
+    doc.addImage(oc.toDataURL("image/png"),"PNG",ML+1,y+1,PW-2,grafikH-2);
+  } catch(e){console.warn("CTG canvas error:",e);}
+
+  // ── Catatan ──
+  if(p.catatanP){
+    doc.setFontSize(6);doc.setFont("helvetica","italic");doc.setTextColor(...C.muted);
+    doc.text("Catatan: "+p.catatanP.substring(0,120),ML,H-5.5);
+  }
+
+  // ── Footer ──
+  doc.setFillColor(...C.tealDark);doc.rect(0,H-8,W,8,"F");
+  doc.setFillColor(255,255,255);doc.roundedRect(3,H-7.5,7,7,1,1,"F");
+  try{doc.addImage(KEMENKES_LOGO,"PNG",3.5,H-7,6,6);}catch(e){}
+  doc.setFontSize(5.5);doc.setFont("helvetica","normal");doc.setTextColor(186,230,253);
+  doc.text("NST Monitor  |  Kementerian Kesehatan RI  |  Sistem Pemantauan Kardiotokografi (CTG) Digital",W/2,H-4,{align:"center"});
+  doc.setTextColor(101,200,220);
+  doc.text("* Laporan ini bukan pengganti diagnosis dokter spesialis",W-MR,H-4,{align:"right"});
+
+  if (p.returnBlob) {
+    return doc.output("blob");
+  }
+  doc.save(p.namaFile);
+}
+
+function HistGraph({ data, dateLabel, sessionRec, pasien, lastPdfBlob, lastPdfName }) {
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    if (!data) return;
+    const bpmArr  = data.bpm_data  || [];
+    const tocoArr = data.toco_data || [];
+    const bmIdxs  = data.bm_indexes || [];
+    const nF = bpmArr.length;
+    if (nF === 0) return;
+
+    // ── Canvas dengan lebar proporsional waktu nyata ──
+    const oPL = 60, oPR = 12, oh = 300;
+    const oGW = Math.max(800, nF * PX_PER_PT);
+    const ow  = oGW + oPL + oPR;
+
+    // Buat / resize canvas di dalam scroll container
+    const container = scrollRef.current;
+    if (!container) return;
+    let canvas = container.querySelector("canvas");
+    if (!canvas) { canvas = document.createElement("canvas"); container.appendChild(canvas); }
+    canvas.width  = ow;
+    canvas.height = oh;
+    canvas.style.height = oh + "px";
+    canvas.style.display = "block";
+
+    renderCTGCanvas(canvas, bpmArr, tocoArr, bmIdxs);
+  }, [data]);
+
+  // ── Export Riwayat sebagai PDF ─────────────────────────────────
+  // Fast-path: jika sesi yang sedang dibuka memang sesi terakhir yang baru
+  // disimpan dari Monitor Live (cocokkan via session_id), pakai blob yang
+  // sudah ada. Selain itu, generate ulang dari data DB — formatnya identik
+  // karena memakai fungsi generateNSTPDF() yang sama persis dengan exportPDF.
+  const savePDF = () => {
+    if (!data) { alert("Data grafik belum termuat."); return; }
+    const bpmArr  = data.bpm_data  || [];
+    const tocoArr = data.toco_data || [];
+    const bmIdxs  = data.bm_indexes || [];
+    if (bpmArr.length === 0) { alert("Data sesi ini kosong, tidak ada yang bisa disimpan."); return; }
+
+    // Helper: parse string durasi seperti "12 mnt" / "45 dtk" / "1 mnt 30 dtk" → detik
+    const parseDurStr = (s) => {
+      if (!s || typeof s !== "string") return 0;
+      let total = 0;
+      const m1 = s.match(/(\d+)\s*mnt/);  if (m1) total += parseInt(m1[1])*60;
+      const m2 = s.match(/(\d+)\s*dtk/);  if (m2) total += parseInt(m2[1]);
+      return total;
+    };
+
+    // Pilih nama file canonik (sama format dengan exportPDF di Monitor Live)
+    const tglIso = (sessionRec?.tanggal || new Date().toISOString().slice(0,10));
+    const namaForFile = (pasien?.nama || "Pasien").replace(/ /g,"_");
+    const namaFile = "NST_" + namaForFile + "_" + tglIso + ".pdf";
+
+    // Fast-path: blob sudah ada DAN session_id-nya cocok dengan yang sedang
+    // ditampilkan. Cek nama file (mengandung tanggal sesi) sebagai pengaman.
+    if (lastPdfBlob && lastPdfName && lastPdfName === namaFile) {
+      const url = URL.createObjectURL(lastPdfBlob);
+      const a = document.createElement("a");
+      a.href = url; a.download = lastPdfName; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      return;
+    }
+
+    // ── Slow-path: generate ulang dari data DB ──
+    const nF = bpmArr.length;
+
+    // Durasi: prioritas total_raw (jumlah titik asli sebelum downsample) ×
+    // interval, fallback ke parsing string "rec.durasi", fallback ke nF.
+    const totalRaw = parseInt(data.total_raw || 0);
+    let durSec = totalRaw > 0 ? Math.round(totalRaw * DATA_INTERVAL_S) : 0;
+    if (!durSec) durSec = parseDurStr(sessionRec?.durasi);
+    if (!durSec) durSec = Math.round(nF * DATA_INTERVAL_S);
+
+    // Statistik dari data yang ada (sama metode dgn exportPDF)
+    const avgBpm  = Math.round(bpmArr.reduce((a,b)=>a+b,0)/nF);
+    const avgToco = tocoArr.length ? Math.round(tocoArr.reduce((a,b)=>a+b,0)/tocoArr.length) : null;
+
+    // Format string sesuai gaya exportPDF
+    const durStr = durSec < 60
+      ? durSec + " dtk"
+      : Math.floor(durSec/60) + " mnt" + (durSec%60 ? " " + durSec%60 + " dtk" : "");
+
+    // Tanggal & jam: dari sessionRec (data DB) — bukan jam sekarang
+    let tglSesiStr = "-";
+    if (sessionRec?.tanggal) {
+      try {
+        const d = new Date(sessionRec.tanggal + "T00:00:00");
+        tglSesiStr = d.toLocaleDateString("id-ID",{day:"2-digit",month:"long",year:"numeric"});
+      } catch(e) { tglSesiStr = sessionRec.tanggal; }
+    }
+    const jamSesi = sessionRec?.jam || "-";
+
+    // Bookmark count: prioritas dari rec (lebih akurat krn dari DB sebelum downsample)
+    const bmCount = (sessionRec?.bm_count != null) ? sessionRec.bm_count : bmIdxs.length;
+
+    generateNSTPDF({
+      bpmArr, tocoArr, bmIdxs, durSec,
+      avgBpm, avgToco,
+      namaP:    pasien?.nama           || "-",
+      rmP:      pasien?.no_rekam_medis || "-",
+      usiaP:    pasien?.usia_kehamilan ? pasien.usia_kehamilan+" minggu" : "-",
+      catatanP: pasien?.catatan        || "",
+      tglSesi:  tglSesiStr,
+      jamSesi,
+      durStr,
+      bmStr:    bmCount + "x",
+      namaFile,
+    });
+  };
+
+  return (
+    <div>
+      {/* Container scrollable — grafik skala waktu nyata (fixed pixel per titik) */}
+      <div ref={scrollRef} style={{
+        width:"100%", overflowX:"auto", overflowY:"hidden",
+        borderRadius:8, border:"1px solid rgba(0,0,0,.07)",
+        background:"#fffdf7",
+      }} />
+      <button onClick={savePDF} style={{
+        marginTop:12, padding:"10px 22px",
+        background:"linear-gradient(135deg,#0891b2,#0e7490)",
+        border:"none", borderRadius:50, color:"#fff",
+        fontFamily:F, fontWeight:800, fontSize:13, cursor:"pointer",
+        boxShadow:"0 4px 14px rgba(8,145,178,.35)",
+      }}>
+        📄 Unduh Laporan PDF
+      </button>
+    </div>
+  );
+}
+
+// ── Alarm Banner ──────────────────────────────────────────────────
+function Alarm({ msgs }) {
+  if (!msgs.length) return null;
+  return (
+    <div style={{
+      position:"fixed", top:0, left:0, right:0, zIndex:9999,
+      background:"linear-gradient(90deg,#fee2e2,#fecaca,#fee2e2)",
+      borderBottom:"3px solid #ef4444",
+      padding:"12px 24px", display:"flex", alignItems:"center", gap:10,
+      animation:"blink-alarm 1.2s ease-in-out infinite",
+      fontFamily: F,
+    }}>
+      <span style={{fontSize:20}}>🚨</span>
+      <span style={{fontWeight:800, color:"#b91c1c", fontSize:13, flex:1}}>
+        PERHATIAN! &nbsp;{msgs.join("  •  ")}
+      </span>
+      <span style={{fontSize:20}}>🚨</span>
+    </div>
+  );
+}
+
+// ── Status Card ───────────────────────────────────────────────────
+function StatCard({ label, status, icon, detail }) {
+  const ok = status === "Normal";
+  return (
+    <div className="card-h" style={{
+      flex:1, padding:"18px 16px", borderRadius:18, textAlign:"center",
+      background: ok ? "linear-gradient(135deg,#f0fdf4,#dcfce7)" : "linear-gradient(135deg,#fff7ed,#ffedd5)",
+      border:`2px solid ${ok ? "#86efac" : "#fdba74"}`,
+      boxShadow: ok ? "0 4px 18px rgba(134,239,172,.25)" : "0 4px 18px rgba(253,186,116,.3)",
+    }}>
+      <div style={{fontSize:26, marginBottom:6}}>{icon}</div>
+      <div style={{fontSize:9, fontWeight:700, letterSpacing:1.5, color:ok?"#15803d":"#c2410c", fontFamily:M, marginBottom:4}}>{label}</div>
+      <div style={{fontSize:18, fontWeight:900, color:ok?"#16a34a":"#ea580c"}}>{status}</div>
+      <div style={{fontSize:10, color:ok?"#4ade80":"#fb923c", marginTop:6,
+        background:ok?"rgba(74,222,128,.15)":"rgba(251,146,60,.15)",
+        borderRadius:50, padding:"2px 10px", fontFamily:M, fontWeight:600, display:"inline-block"
+      }}>{detail}</div>
+    </div>
+  );
+}
+
+// ── Progress Bar ──────────────────────────────────────────────────
+function Bar({ value, max, color }) {
+  return (
+    <div style={{ marginTop:10, height:3, borderRadius:99, background:"rgba(0,0,0,.08)" }}>
+      <div style={{
+        height:"100%", borderRadius:99,
+        background:`linear-gradient(90deg, ${color}, ${color}99)`,
+        width:`${Math.min(100, Math.max(0, (value/max)*100))}%`,
+        transition:"width .5s",
+      }} />
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  LANDING PAGE — komponen terpisah agar hooks tidak kondisional
+// ════════════════════════════════════════════════════════════════
+function LandingPage({ onLogin }) {
+  const [activeFaq,    setActiveFaq]    = useState(null);
+  const [patientCount, setPatientCount] = useState(null);
+  const [activeSection,setActiveSection]= useState("beranda");
+  const [navVisible,   setNavVisible]   = useState(true);
+  const lastScrollY = useRef(0);
+
+  useEffect(() => {
+    const onScroll = () => {
+      const curr = window.scrollY;
+      // Tampilkan jika scroll ke atas atau di paling atas
+      setNavVisible(curr < lastScrollY.current || curr < 60);
+      lastScrollY.current = curr;
+    };
+    window.addEventListener("scroll", onScroll, {passive:true});
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    fetch(API_PATIENTS)
+      .then(r => r.json())
+      .then(d => setPatientCount(Array.isArray(d) ? d.length : 0))
+      .catch(() => setPatientCount(0));
+  }, []);
+
+  const navItems = [
+    {id:"beranda",   label:"Beranda"},
+    {id:"tentang",   label:"Tentang CTG"},
+    {id:"manfaat",   label:"Manfaat"},
+    {id:"kehamilan", label:"Info Kehamilan"},
+    {id:"faq",       label:"FAQ"},
+  ];
+
+  const scrollTo = (id) => {
+    setActiveSection(id);
+    const el = document.getElementById("lp-"+id);
+    if (el) el.scrollIntoView({behavior:"smooth", block:"start"});
+  };
+
+  const facts = [
+    {icon:"👶", val: patientCount !== null ? String(patientCount) : "–", label:"Pasien Terdaftar", color:"#f43f5e"},
+    {icon:"⏱",  val:"10–20",label:"Menit per Pemeriksaan",    color:"#0891b2"},
+    {icon:"🏥", val:"24/7", label:"Monitoring Real-time",      color:"#059669"},
+  ];
+
+  const ctgInfo = [
+    {icon:"🩺", title:"Apa itu CTG?",
+     body:"Cardiotocography (CTG) adalah pemeriksaan untuk memantau detak jantung janin (DJJ) dan kontraksi rahim secara bersamaan. Alat ini membantu dokter menilai kondisi kesehatan janin selama kehamilan atau persalinan."},
+    {icon:"📊", title:"Fetal Heart Rate (FHR)",
+     body:"DJJ normal janin berada di kisaran 110–160 bpm. Nilai di bawah 110 bpm disebut bradikardi, sedangkan di atas 160 bpm disebut takikardi. Kedua kondisi ini memerlukan perhatian medis segera."},
+    {icon:"🌊", title:"Kontraksi Uterus (TOCO)",
+     body:"Sensor TOCO mengukur tekanan kontraksi rahim. Kontraksi normal ditandai dengan pola yang teratur. Kontraksi terlalu sering atau terlalu kuat dapat menjadi indikasi kondisi yang perlu ditangani."},
+    {icon:"📈", title:"Non-Stress Test (NST)",
+     body:"NST adalah tes non-invasif yang mengamati respons DJJ terhadap gerakan janin. Hasil 'reaktif' (≥2 akselerasi dalam 20 menit) menunjukkan kondisi janin yang baik."},
+  ];
+
+  const manfaat = [
+    {icon:"🔍", title:"Deteksi Dini",           body:"Mendeteksi tanda gawat janin sejak dini sebelum kondisi memburuk."},
+    {icon:"📱", title:"Monitoring Jarak Jauh",   body:"Hasil pemantauan dapat diakses dokter secara real-time dari mana saja."},
+    {icon:"💾", title:"Rekam Medis Digital",     body:"Semua data tersimpan otomatis dan dapat dicetak sebagai laporan PDF."},
+    {icon:"⚡", title:"Respons Cepat",           body:"Alarm otomatis berbunyi jika DJJ atau kontraksi di luar batas normal."},
+    {icon:"🌸", title:"Ibu Lebih Tenang",        body:"Pemantauan rutin memberi ketenangan bagi ibu dan keluarga."},
+    {icon:"👨‍⚕️", title:"Bantu Keputusan Dokter", body:"Data objektif membantu dokter membuat keputusan klinis yang tepat."},
+  ];
+
+  const kehamilanInfo = [
+    {minggu:"Trimester 1 (1–12 mg)", icon:"🌱", warna:"#d1fae5", ikon_bg:"#059669",
+     poin:["Jantung janin mulai berdetak ~22 hari","Organ utama terbentuk di minggu 6–10","DJJ pertama kali terdeteksi USG ~6 minggu","Penting: konsumsi asam folat"]},
+    {minggu:"Trimester 2 (13–27 mg)", icon:"🌿", warna:"#dbeafe", ikon_bg:"#2563eb",
+     poin:["DJJ stabil 120–160 bpm","Janin mulai bergerak ~18–20 mg","CTG mulai bisa dilakukan ab 26 mg","Penting: cek kadar darah & gula"]},
+    {minggu:"Trimester 3 (28–40 mg)", icon:"🌳", warna:"#fce7f3", ikon_bg:"#be185d",
+     poin:["NST direkomendasikan tiap kunjungan","DJJ harus responsif thd gerakan janin","Kontraksi Braxton Hicks mulai terasa","Penting: pantau gerak janin harian"]},
+  ];
+
+  const faqs = [
+    {q:"Apakah CTG aman untuk ibu dan janin?",
+     a:"Ya, CTG sepenuhnya aman. Alat ini tidak memancarkan radiasi dan bersifat non-invasif — hanya menggunakan sensor eksternal yang ditempelkan di perut ibu."},
+    {q:"Kapan sebaiknya melakukan NST?",
+     a:"NST umumnya dilakukan mulai usia kehamilan 28 minggu ke atas, terutama pada kehamilan berisiko tinggi seperti diabetes gestasional, hipertensi, atau kehamilan lewat waktu."},
+    {q:"Berapa lama pemeriksaan NST berlangsung?",
+     a:"Rata-rata 20–40 menit. Jika janin sedang tidur, pemeriksaan bisa diperpanjang hingga 60–80 menit."},
+    {q:"Apa arti hasil NST 'reaktif'?",
+     a:"Reaktif berarti terdapat minimal 2 akselerasi DJJ (naik ≥15 bpm selama ≥15 detik) dalam 20 menit — menandakan janin dalam kondisi baik."},
+    {q:"Apa yang terjadi jika hasil NST 'non-reaktif'?",
+     a:"Tidak selalu berarti berbahaya. Dokter akan melakukan evaluasi lanjutan seperti USG biofisik atau tes kontraksi (CST) untuk memastikan kondisi janin."},
+  ];
+
+  return (
+    <div style={{fontFamily:F, background:"#fafafa", minHeight:"100vh"}}>
+
+      {/* ── Navbar ── */}
+      <nav style={{
+        position:"sticky", top:0, zIndex:100,
+        background:"rgba(255,255,255,0.95)", backdropFilter:"blur(16px)",
+        borderBottom:"1px solid rgba(0,0,0,0.06)",
+        boxShadow:"0 2px 20px rgba(0,0,0,0.05)",
+        padding:"0 32px",
+        display:"flex", alignItems:"center", justifyContent:"space-between", height:64,
+        transform: navVisible ? "translateY(0)" : "translateY(-100%)",
+        transition: "transform 0.3s ease",
+      }}>
+        {/* Logo kemenkes */}
+        <div style={{display:"flex", alignItems:"center", gap:12}}>
+          <div style={{
+            width:42, height:42, borderRadius:10,
+            background:"linear-gradient(135deg,#0e7490,#0891b2)",
+            display:"flex", alignItems:"center", justifyContent:"center",
+            boxShadow:"0 4px 12px rgba(8,145,178,.3)", overflow:"hidden",
+          }}>
+            <img src={KEMENKES_LOGO} alt="Kemenkes"
+              style={{width:36,height:36,objectFit:"contain"}}
+              onError={e=>{e.target.style.display="none"; e.target.parentNode.innerHTML="🏥";}}
+            />
+          </div>
+          <div>
+            <div style={{fontWeight:900, fontSize:15, color:"#1e293b", letterSpacing:-.3}}>NST Monitor</div>
+            <div style={{fontSize:9, color:"#94a3b8", fontFamily:M, letterSpacing:1}}>KEMENKES RI · NON-STRESS TEST</div>
+          </div>
+        </div>
+
+        {/* Nav links */}
+        <div style={{display:"flex", gap:2, alignItems:"center"}}>
+          {navItems.map(n => (
+            <button key={n.id} onClick={() => scrollTo(n.id)} style={{
+              padding:"6px 14px", border:"none", borderRadius:20,
+              background: activeSection===n.id ? "#fff1f2" : "transparent",
+              color: activeSection===n.id ? "#f43f5e" : "#64748b",
+              fontFamily:F, fontSize:13, fontWeight:700, cursor:"pointer",
+              transition:"all .15s",
+            }}>{n.label}</button>
+          ))}
+        </div>
+
+        {/* Tombol Login */}
+        <button onClick={onLogin} style={{
+          padding:"10px 22px", border:"none", borderRadius:22,
+          background:"linear-gradient(135deg,#fb7185,#f43f5e)",
+          color:"#fff", fontFamily:F, fontSize:13, fontWeight:800,
+          cursor:"pointer", boxShadow:"0 4px 14px rgba(244,63,94,.35)",
+          display:"flex", alignItems:"center", gap:6,
+        }}>🔐 Login Sistem</button>
+      </nav>
+
+      {/* ── Hero ── */}
+      <div id="lp-beranda" style={{
+        background:"linear-gradient(135deg,#fff5f7 0%,#fef9f0 50%,#f0f9ff 100%)",
+        padding:"80px 32px 64px", textAlign:"center",
+        position:"relative", overflow:"hidden",
+      }}>
+        <div style={{position:"absolute",top:-100,right:-100,width:400,height:400,borderRadius:"50%",
+          background:"radial-gradient(circle,rgba(253,186,116,.25),transparent 70%)",pointerEvents:"none"}}/>
+        <div style={{position:"absolute",bottom:-80,left:-80,width:350,height:350,borderRadius:"50%",
+          background:"radial-gradient(circle,rgba(186,230,253,.3),transparent 70%)",pointerEvents:"none"}}/>
+
+        <div style={{
+          display:"inline-flex", alignItems:"center", gap:8, padding:"6px 16px",
+          background:"rgba(244,63,94,.08)", borderRadius:50, marginBottom:24,
+          border:"1px solid rgba(244,63,94,.2)",
+        }}>
+          <div style={{width:7,height:7,borderRadius:"50%",background:"#f43f5e",
+            animation:"pulse-ring 1.8s ease-out infinite"}}/>
+          <span style={{fontSize:11,fontWeight:700,color:"#f43f5e",fontFamily:M,letterSpacing:1}}>
+            SISTEM MONITORING REAL-TIME
+          </span>
+        </div>
+
+        <h1 style={{fontSize:46,fontWeight:900,color:"#1e293b",letterSpacing:-1.5,
+          lineHeight:1.1,maxWidth:700,margin:"0 auto 18px"}}>
+          Pantau Kesehatan Janin<br/>
+          <span style={{background:"linear-gradient(135deg,#f43f5e,#fb923c)",
+            WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>
+            Lebih Cerdas & Real-time
+          </span>
+        </h1>
+        <p style={{fontSize:17,color:"#64748b",maxWidth:560,margin:"0 auto 36px",lineHeight:1.7}}>
+          Sistem NST berbasis IoT untuk pemantauan detak jantung janin<br/>
+          dan kontraksi uterus — akurat, cepat, dan mudah digunakan.
+        </p>
+        <div style={{display:"flex",gap:14,justifyContent:"center",flexWrap:"wrap"}}>
+          <button onClick={onLogin} style={{
+            padding:"14px 32px", border:"none", borderRadius:16,
+            background:"linear-gradient(135deg,#fb7185,#f43f5e)",
+            color:"#fff", fontFamily:F, fontSize:15, fontWeight:800,
+            cursor:"pointer", boxShadow:"0 8px 24px rgba(244,63,94,.35)",
+          }}>🚀 Mulai Monitoring</button>
+          <button onClick={() => scrollTo("tentang")} style={{
+            padding:"14px 32px", border:"2px solid #e2e8f0", borderRadius:16,
+            background:"#fff", color:"#475569", fontFamily:F,
+            fontSize:15, fontWeight:700, cursor:"pointer",
+          }}>📖 Pelajari Lebih Lanjut</button>
+        </div>
+      </div>
+
+      {/* ── Statistik ── */}
+      <div style={{background:"#fff",padding:"40px 32px",
+        borderTop:"1px solid #f1f5f9",borderBottom:"1px solid #f1f5f9"}}>
+        <div style={{maxWidth:900,margin:"0 auto",
+          display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:24}}>
+          {facts.map(f => (
+            <div key={f.label} style={{textAlign:"center",padding:"20px 12px"}}>
+              <div style={{fontSize:32,marginBottom:8}}>{f.icon}</div>
+              <div style={{fontSize:32,fontWeight:900,color:f.color,letterSpacing:-1}}>{f.val}</div>
+              <div style={{fontSize:12,color:"#94a3b8",fontWeight:600,marginTop:4}}>{f.label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Tentang CTG ── */}
+      <div id="lp-tentang" style={{padding:"64px 32px",background:"#fafafa"}}>
+        <div style={{maxWidth:900,margin:"0 auto"}}>
+          <div style={{textAlign:"center",marginBottom:40}}>
+            <span style={{fontSize:11,fontWeight:700,color:"#0891b2",fontFamily:M,
+              letterSpacing:2,background:"#e0f2fe",padding:"4px 12px",borderRadius:50}}>EDUKASI CTG</span>
+            <h2 style={{fontSize:30,fontWeight:900,color:"#1e293b",marginTop:12,letterSpacing:-.5}}>
+              Memahami Pemeriksaan CTG
+            </h2>
+            <p style={{color:"#64748b",fontSize:14,marginTop:8,maxWidth:500,margin:"8px auto 0"}}>
+              Cardiotocography adalah alat bantu diagnosis yang penting dalam pemantauan kehamilan
+            </p>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:20}}>
+            {ctgInfo.map(c => (
+              <div key={c.title} style={{
+                background:"#fff",borderRadius:20,padding:"28px",
+                border:"1px solid #f1f5f9",boxShadow:"0 2px 16px rgba(0,0,0,.04)",
+              }} className="card-h">
+                <div style={{fontSize:28,marginBottom:12}}>{c.icon}</div>
+                <h3 style={{fontSize:16,fontWeight:800,color:"#1e293b",marginBottom:8}}>{c.title}</h3>
+                <p style={{fontSize:13,color:"#64748b",lineHeight:1.7}}>{c.body}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Manfaat ── */}
+      <div id="lp-manfaat" style={{padding:"64px 32px",background:"#fff"}}>
+        <div style={{maxWidth:900,margin:"0 auto"}}>
+          <div style={{textAlign:"center",marginBottom:40}}>
+            <span style={{fontSize:11,fontWeight:700,color:"#059669",fontFamily:M,
+              letterSpacing:2,background:"#d1fae5",padding:"4px 12px",borderRadius:50}}>KEUNGGULAN</span>
+            <h2 style={{fontSize:30,fontWeight:900,color:"#1e293b",marginTop:12,letterSpacing:-.5}}>
+              Mengapa Menggunakan NST Monitor?
+            </h2>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:18}}>
+            {manfaat.map(m => (
+              <div key={m.title} style={{
+                background:"linear-gradient(135deg,#fafafa,#fff)",borderRadius:18,
+                padding:"24px 22px",border:"1px solid #f1f5f9",
+                boxShadow:"0 2px 12px rgba(0,0,0,.04)",
+              }} className="card-h">
+                <div style={{fontSize:26,marginBottom:10}}>{m.icon}</div>
+                <h3 style={{fontSize:14,fontWeight:800,color:"#1e293b",marginBottom:6}}>{m.title}</h3>
+                <p style={{fontSize:12,color:"#64748b",lineHeight:1.6}}>{m.body}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Info Kehamilan ── */}
+      <div id="lp-kehamilan" style={{padding:"64px 32px",
+        background:"linear-gradient(135deg,#fff5f7,#fef9f0)"}}>
+        <div style={{maxWidth:900,margin:"0 auto"}}>
+          <div style={{textAlign:"center",marginBottom:40}}>
+            <span style={{fontSize:11,fontWeight:700,color:"#be185d",fontFamily:M,
+              letterSpacing:2,background:"#fce7f3",padding:"4px 12px",borderRadius:50}}>INFO KEHAMILAN</span>
+            <h2 style={{fontSize:30,fontWeight:900,color:"#1e293b",marginTop:12,letterSpacing:-.5}}>
+              Perkembangan Janin per Trimester
+            </h2>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:20}}>
+            {kehamilanInfo.map(k => (
+              <div key={k.minggu} style={{
+                background:"#fff",borderRadius:20,padding:"28px 24px",
+                border:`2px solid ${k.warna}`,boxShadow:"0 4px 20px rgba(0,0,0,.05)",
+              }} className="card-h">
+                <div style={{width:48,height:48,borderRadius:14,marginBottom:16,
+                  background:k.warna,display:"flex",alignItems:"center",
+                  justifyContent:"center",fontSize:22}}>{k.icon}</div>
+                <h3 style={{fontSize:13,fontWeight:800,color:"#1e293b",marginBottom:14}}>{k.minggu}</h3>
+                <ul style={{listStyle:"none",padding:0,margin:0}}>
+                  {k.poin.map((p,i) => (
+                    <li key={i} style={{fontSize:12,color:"#475569",lineHeight:1.6,
+                      padding:"4px 0",borderBottom:i<k.poin.length-1?"1px solid #f1f5f9":"none",
+                      display:"flex",alignItems:"flex-start",gap:8}}>
+                      <span style={{color:k.ikon_bg,fontWeight:700,flexShrink:0}}>✓</span>{p}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── FAQ ── */}
+      <div id="lp-faq" style={{padding:"64px 32px",background:"#fff"}}>
+        <div style={{maxWidth:700,margin:"0 auto"}}>
+          <div style={{textAlign:"center",marginBottom:40}}>
+            <span style={{fontSize:11,fontWeight:700,color:"#7c3aed",fontFamily:M,
+              letterSpacing:2,background:"#ede9fe",padding:"4px 12px",borderRadius:50}}>FAQ</span>
+            <h2 style={{fontSize:30,fontWeight:900,color:"#1e293b",marginTop:12,letterSpacing:-.5}}>
+              Pertanyaan yang Sering Diajukan
+            </h2>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {faqs.map((f,i) => (
+              <div key={i} style={{
+                background:activeFaq===i?"#fff":"#fafafa",
+                borderRadius:16,border:`1px solid ${activeFaq===i?"#fda4af":"#f1f5f9"}`,
+                overflow:"hidden",transition:"all .2s",
+                boxShadow:activeFaq===i?"0 4px 20px rgba(244,63,94,.08)":"none",
+              }}>
+                <button onClick={() => setActiveFaq(activeFaq===i?null:i)} style={{
+                  width:"100%",padding:"18px 20px",
+                  display:"flex",alignItems:"center",justifyContent:"space-between",
+                  background:"transparent",border:"none",cursor:"pointer",
+                  fontFamily:F,fontSize:14,fontWeight:700,color:"#1e293b",textAlign:"left",
+                }}>
+                  <span>{f.q}</span>
+                  <span style={{fontSize:18,color:"#f43f5e",flexShrink:0,marginLeft:12,
+                    transform:activeFaq===i?"rotate(180deg)":"rotate(0)",transition:"transform .2s"}}>⌄</span>
+                </button>
+                {activeFaq===i && (
+                  <div style={{padding:"0 20px 18px",fontSize:13,color:"#64748b",
+                    lineHeight:1.7,animation:"fadeSlideIn .2s ease"}}>{f.a}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Footer CTA ── */}
+      <div style={{background:"linear-gradient(135deg,#1e293b,#0f172a)",
+        padding:"52px 32px",textAlign:"center"}}>
+        <div style={{fontSize:32,marginBottom:16}}>🌸</div>
+        <h2 style={{fontSize:24,fontWeight:900,color:"#fff",marginBottom:10}}>
+          Siap Memulai Monitoring?
+        </h2>
+        <p style={{fontSize:14,color:"#94a3b8",maxWidth:400,margin:"0 auto 28px"}}>
+          Login ke sistem untuk mulai memantau kondisi janin secara real-time
+        </p>
+        <button onClick={onLogin} style={{
+          padding:"14px 36px",border:"none",borderRadius:16,
+          background:"linear-gradient(135deg,#fb7185,#f43f5e)",
+          color:"#fff",fontFamily:F,fontSize:15,fontWeight:800,
+          cursor:"pointer",boxShadow:"0 8px 24px rgba(244,63,94,.4)",
+        }}>🔐 Login Sekarang</button>
+        <div style={{marginTop:32,fontSize:11,color:"#475569",fontFamily:M}}>
+          © 2026 NST Monitor · Kementerian Kesehatan RI · Sistem Pemantauan Non-Stress Test
+        </div>
+      </div>
+
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  MAIN APP
+// ════════════════════════════════════════════════════════════════
+function App() {
+  const [page,  setPage]  = useState("landing"); // mulai dari landing, bukan login
+  const [tab,   setTab]   = useState("monitor");
+  const [user,  setUser]  = useState(null);
+  const [loginU, setLoginU] = useState("");
+  const [loginP, setLoginP] = useState("");
+  const [loginErr, setLoginErr] = useState("");
+
+  // Patient state
+  const [patientList,    setPatientList]    = useState([]);
+  const [patientLoading, setPatientLoading] = useState(false);
+  const [selectedPatient,setSelectedPatient]= useState(null);
+  const [showAddForm,    setShowAddForm]    = useState(false);
+  const [patientSearch,  setPatientSearch]  = useState("");
+  const [newPasien, setNewPasien] = useState({
+    nama:"", tanggal_lahir:"", no_rekam_medis:"", usia_kehamilan:"",
+    nama_suami:"", no_telp:"", catatan:""
+  });
+  const [savingPasien, setSavingPasien] = useState(false);
+  const [pasienErr,    setPasienErr]    = useState("");
+
+  // Live data state
+  const [bpm,    setBpm]    = useState(null);
+  const [toco,   setToco]   = useState(null);
+  const [bpmH,   setBpmH]   = useState([]);   // sliding window 90 detik untuk tampilan
+  const [tocoH,  setTocoH]  = useState([]);   // sliding window 90 detik untuk tampilan
+  const [bmIdxs, setBmIdxs] = useState([]);
+  const [lastBm, setLastBm] = useState(null);
+  // Full-session arrays tanpa batas — untuk PDF
+  const [bpmFull,    setBpmFull]    = useState([]);
+  const [tocoFull,   setTocoFull]   = useState([]);
+  const [bmIdxsFull, setBmIdxsFull] = useState([]);
+  const [online, setOnline] = useState(false);
+  const [lastUpdateStr, setLastUpdateStr] = useState(null);
+  // Status koneksi per-sensor (untuk 2 ESP32 terpisah)
+  const [fhrOnline,  setFhrOnline]  = useState(false);
+  const [tocoOnline, setTocoOnline] = useState(false);
+  // Status recording session
+  const [recording,        setRecording]        = useState(false);
+  const [sessionId,        setSessionId]        = useState(null);
+  const [sessionStartedAt, setSessionStartedAt] = useState(null);
+  const [recDuration,      setRecDuration]      = useState(0); // detik
+  const [lastRecDuration,  setLastRecDuration]  = useState(0); // durasi tersimpan setelah stop
+  const [lastPdfBlob,      setLastPdfBlob]      = useState(null); // PDF blob dari exportPDF
+  const [lastPdfName,      setLastPdfName]      = useState("laporan.pdf");
+
+  // History state
+  const [histList,    setHistList]    = useState([]);
+  const [histLoading, setHistLoading] = useState(false);
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [histGraphData, setHistGraphData] = useState(null);
+  const [histGraphLoading, setHistGraphLoading] = useState(false);
+  const [histGraphError, setHistGraphError] = useState("");
+  const [histNeedsRefresh, setHistNeedsRefresh] = useState(false);
+  const [hasRecordingEnded, setHasRecordingEnded] = useState(false); // true setelah stop
+
+  // Refs to avoid stale closures
+  const lastTsRef      = useRef(null);
+  const lastBmTsRef    = useRef(0);
+  const lastBmIdRef    = useRef(0);   // ID bookmark dari server (angka DB kecil)
+  const lastBmMqttRef  = useRef(0);   // timestamp bookmark dari MQTT (Date.now())
+  const offTimerRef    = useRef(null);
+  const bpmHLenRef     = useRef(0);
+  const ctgRef         = useRef(null);
+  const mqttClientRef  = useRef(null);
+  const lastBpmValRef  = useRef(null); // nilai BPM terakhir — untuk sinkronisasi grafik
+  const lastTocoValRef = useRef(null); // nilai TOCO terakhir — untuk sinkronisasi grafik
+  const prevRecordingRef = useRef(false);
+  const recordingRef     = useRef(false); // mirror recording state untuk useCallback
+  const sessionStartedRef = useRef(false); // sudah set sessionStartedAt untuk sesi ini?
+  const [mqttStatus, setMqttStatus] = useState("connecting");
+
+  // Demo mode
+  const [demoMode, setDemoMode] = useState(false);
+  const demoIntervalRef = useRef(null);
+
+  bpmHLenRef.current = bpmH.length;
+
+  // Alarms
+  const alarmMsgs = [];
+  if (bpm  !== null && !isBPMNormal(bpm))  alarmMsgs.push(`DJJ ${bpm} bpm — ${sBPM(bpm)} (Normal: 110–160)`);
+  if (toco !== null && !isTOCONormal(toco)) alarmMsgs.push(`TOCO ${toco} unit — ${sTOCO(toco)} (Normal: 25–80)`);
+
+  // ── Helper: proses satu titik data baru (dipanggil dari MQTT handler) ────
+  const processLiveData = useCallback((bpmVal, tocoVal, bmId) => {
+    // Update nilai terbaru untuk display angka
+    if (bpmVal  !== null && bpmVal  !== undefined) { setBpm(bpmVal);  lastBpmValRef.current  = bpmVal;  }
+    if (tocoVal !== null && tocoVal !== undefined) { setToco(tocoVal); lastTocoValRef.current = tocoVal; }
+
+    // Gunakan nilai terakhir jika salah satu null — agar grafik SELALU sejajar
+    const bpmPush  = (bpmVal  !== null && bpmVal  !== undefined) ? bpmVal  : lastBpmValRef.current;
+    const tocoPush = (tocoVal !== null && tocoVal !== undefined) ? tocoVal : lastTocoValRef.current;
+
+    // Push ke grafik sliding window (selalu, untuk tampilan live)
+    if (bpmPush !== null || tocoPush !== null) {
+      if (bpmPush  !== null) setBpmH(h  => [...h.slice(-1199),  bpmPush]);
+      if (tocoPush !== null) setTocoH(h => [...h.slice(-1199), tocoPush]);
+      setBmIdxs(prev => prev.map(o => o + 1).filter(o => o < 1200));
+    }
+
+    // Push ke Full arrays HANYA saat recording aktif
+    // Full arrays = data yang akan dijadikan PDF, hanya dari Start sampai Stop
+    if (recordingRef.current) {
+      if (bpmPush  !== null) setBpmFull(h  => [...h, bpmPush]);
+      if (tocoPush !== null) setTocoFull(h => [...h, tocoPush]);
+    }
+
+    if (bmId && bmId !== lastBmIdRef.current) {
+      lastBmIdRef.current = bmId;
+      setBmIdxs(prev => [...prev, 0]);
+      // Bookmark di Full hanya jika sedang recording
+      if (recordingRef.current) {
+        setBpmFull(h => { setBmIdxsFull(prev => [...prev, h.length]); return h; });
+      }
+      setLastBm(new Date().toLocaleTimeString("id-ID",
+        {hour:"2-digit", minute:"2-digit", second:"2-digit"}));
+    }
+
+    setOnline(true);
+    setLastUpdateStr(new Date().toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit",second:"2-digit"}));
+
+    if (offTimerRef.current) clearTimeout(offTimerRef.current);
+    offTimerRef.current = setTimeout(() => {
+      setOnline(false); setBpm(null); setToco(null);
+    }, OFFLINE_MS);
+    if (offTimerRef.clearChart) clearTimeout(offTimerRef.clearChart);
+    offTimerRef.clearChart = setTimeout(() => {
+      setBpmH([]); setTocoH([]); setBmIdxs([]);
+    }, 60000);
+  }, []);
+
+  // ── Polling latest.php — HANYA untuk sinkronisasi session/recording state ──
+  const fetchLatest = useCallback(async () => {
+    try {
+      const res = await fetch(API_LATEST + "?t=" + Date.now(), { cache:"no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      if (!data) return;
+
+      const { fhr_online, toco_online } = data;
+      setFhrOnline(!!fhr_online);
+      setTocoOnline(!!toco_online);
+
+      const recNow = !!data.recording;
+      const wasRec = recordingRef.current; // pakai ref, bukan state (tidak stale)
+
+      // Sync ref dulu sebelum set state
+      recordingRef.current = recNow;
+      setRecording(recNow);
+      setSessionId(data.session_id || null);
+
+      if (recNow) {
+        // Recording aktif — set sessionStartedAt hanya SEKALI per sesi
+        // sessionStartedRef reset ke false saat recording berhenti (di bawah)
+        if (!sessionStartedRef.current) {
+          sessionStartedRef.current = true;
+          if (!wasRec) {
+            // Baru mulai — pakai waktu browser sekarang (bebas timezone)
+            setSessionStartedAt(new Date().toISOString());
+          } else if (data.session_started_at) {
+            // Refresh halaman saat sudah recording — kompensasi timezone WIB
+            const serverTime = new Date(data.session_started_at.replace(" ","T") + "+07:00");
+            setSessionStartedAt(serverTime.toISOString());
+          }
+        }
+      } else {
+        // Recording berhenti — simpan durasi terakhir, lalu reset
+        sessionStartedRef.current = false;
+        setSessionStartedAt(null);
+        setRecDuration(prev => { if (prev > 0) setLastRecDuration(prev); return 0; });
+      }
+
+      // BOOKMARK: dihapus dari sini — sudah ditangani MQTT
+      // Polling server tidak lagi trigger bookmark agar tidak double
+    } catch(e) {
+      // Abaikan error polling — MQTT tetap jalan
+    }
+  }, []);
+
+  // ── Hitung durasi recording secara real-time ────────────────
+  useEffect(() => {
+    if (!recording || !sessionStartedAt) { setRecDuration(0); return; }
+    const calc = () => {
+      const start = new Date(sessionStartedAt); // ISO string dari browser, tidak perlu replace
+      setRecDuration(Math.floor((Date.now() - start.getTime()) / 1000));
+    };
+    calc();
+    const iv = setInterval(calc, 1000);
+    return () => clearInterval(iv);
+  }, [recording, sessionStartedAt]);
+
+  // ── Load patients when pilih_pasien page is shown ────────────────────────────
+  useEffect(() => {
+    if (page !== "pilih_pasien") return;
+    loadPatients();
+  }, [page]);
+
+  // ── MQTT: connect & subscribe saat dashboard tampil ───────────
+  useEffect(() => {
+    if (page !== "dashboard" || demoMode) return;
+
+    const client = mqtt.connect(`wss://${MQTT_HOST}:${MQTT_PORT}/mqtt`, {
+      username: MQTT_USER,
+      password: MQTT_PASS,
+      clientId: "web_nst_" + Math.random().toString(16).slice(2, 8),
+      clean: true,
+      reconnectPeriod: 3000,
+    });
+
+    mqttClientRef.current = client;
+    setMqttStatus("connecting");
+
+    client.on("connect", () => {
+      setMqttStatus("connected");
+      client.subscribe(TOPIC_FHR);
+      client.subscribe(TOPIC_TOCO);
+      console.log("[MQTT] Terhubung & subscribe ke", TOPIC_FHR, TOPIC_TOCO);
+    });
+
+    client.on("error", (err) => {
+      setMqttStatus("error");
+      console.error("[MQTT] Error:", err.message);
+    });
+
+    client.on("reconnect", () => setMqttStatus("connecting"));
+    client.on("offline",   () => setMqttStatus("error"));
+
+    // Buffer untuk sinkronisasi FHR + TOCO sebelum push ke grafik
+    let fhrBuf  = null;
+    let tocoBuf = null;
+    let syncTimer = null;
+
+    client.on("message", (topic, payload) => {
+      try {
+        const msg = JSON.parse(payload.toString());
+        if (topic === TOPIC_FHR) {
+          fhrBuf = msg.bpm ?? null;
+          setFhrOnline(true);
+        } else if (topic === TOPIC_TOCO) {
+          tocoBuf = msg.toco ?? null;
+          setTocoOnline(true);
+
+          // ── Deteksi bookmark LANGSUNG di sini, SEBELUM syncTimer ──
+          // Jangan taruh di dalam syncTimer karena buffer akan di-reset duluan
+          if (msg.bookmark === 1) {
+            const now = Date.now();
+            // Debounce 1500ms pakai ref MQTT sendiri — tidak tercampur dengan ref server
+            if (now - lastBmMqttRef.current > 1500) {
+              lastBmMqttRef.current = now;
+              // Sync juga lastBmIdRef agar polling server tidak double-trigger
+              // Set ke nilai negatif besar — tidak akan pernah cocok dengan ID DB
+              lastBmIdRef.current = -now;
+              setBmIdxs(prev => [...prev, 0]);
+              setBpmFull(h => { setBmIdxsFull(prev => [...prev, h.length]); return h; });
+              setLastBm(new Date().toLocaleTimeString("id-ID",
+                {hour:"2-digit", minute:"2-digit", second:"2-digit"}));
+              console.log("[MQTT] Bookmark terdeteksi!", now);
+            }
+          }
+        }
+
+        // Debounce ringan: tunggu 20ms agar FHR + TOCO bisa tiba bersama
+        if (syncTimer) clearTimeout(syncTimer);
+        syncTimer = setTimeout(() => {
+          // Ambil snapshot buffer SEBELUM di-reset
+          const bv = fhrBuf;
+          const tv = tocoBuf;
+          fhrBuf  = null;
+          tocoBuf = null;
+          // Hanya push ke grafik jika ada nilai — bookmark sudah diproses di atas
+          if (bv !== null || tv !== null) processLiveData(bv, tv, null);
+        }, 20);
+
+      } catch(e) {
+        console.warn("[MQTT] Parse error:", e);
+      }
+    });
+
+    // Polling ringan tiap 5 detik — hanya untuk session/recording state
+    fetchLatest();
+    const sessionPoll = setInterval(fetchLatest, 5000);
+
+    return () => {
+      client.end(true);
+      mqttClientRef.current = null;
+      clearInterval(sessionPoll);
+      if (syncTimer) clearTimeout(syncTimer);
+      if (offTimerRef.current) clearTimeout(offTimerRef.current);
+      if (offTimerRef.clearChart) clearTimeout(offTimerRef.clearChart);
+    };
+  }, [page, fetchLatest, processLiveData, demoMode]);
+
+  // ── Handle transisi recording state ────────────────────────
+  useEffect(() => {
+    // recordingRef sudah di-sync di fetchLatest — tidak perlu sync lagi di sini
+
+    const wasRecording = prevRecordingRef.current;
+    prevRecordingRef.current = recording;
+
+    // Transisi false → true: recording MULAI — reset Full arrays
+    if (!wasRecording && recording) {
+      setBpmFull([]);
+      setTocoFull([]);
+      setBmIdxsFull([]);
+      setHasRecordingEnded(false);
+    }
+
+    // Transisi true → false: recording BERHENTI
+    if (wasRecording && !recording && page === "dashboard") {
+      setHasRecordingEnded(true);
+
+      // Polling agresif: coba 5 kali tiap 2 detik sampai data muncul
+      let attempt = 0;
+      const tryFetch = () => {
+        attempt++;
+        fetch(API_HISTORY + "?patient_id=" + (selectedPatient?.id||0) + "&t=" + Date.now())
+          .then(r => r.json())
+          .then(d => {
+            const list = Array.isArray(d) ? d : [];
+            setHistList(list);
+            setHistLoading(false);
+            setHistNeedsRefresh(false);
+            if (list.length === 0 && attempt < 5) setTimeout(tryFetch, 2000);
+          })
+          .catch(() => {
+            if (attempt < 5) setTimeout(tryFetch, 2000);
+            else setHistLoading(false);
+          });
+      };
+      setHistLoading(true);
+      setTimeout(tryFetch, 1500); // mulai setelah 1.5 detik
+    }
+  }, [recording]);
+
+  // ── Reload patients when pasien tab opens ────────────────────
+  useEffect(() => {
+    if (page !== "dashboard" || tab !== "pasien") return;
+    loadPatients();
+  }, [page, tab]);
+
+  // ── Fetch history list when tab changes ───────────────────────
+  useEffect(() => {
+    if (page !== "dashboard" || tab !== "history") return;
+    setHistLoading(true);
+    fetch(API_HISTORY + "?patient_id=" + (selectedPatient?.id||0) + "&t=" + Date.now())
+      .then(r => r.json())
+      .then(d => { setHistList(Array.isArray(d) ? d : []); setHistLoading(false); setHistNeedsRefresh(false); })
+      .catch(() => { setHistList([]); setHistLoading(false); });
+  }, [page, tab, histNeedsRefresh]);
+
+  // ── Fetch graph data dari API (tidak toggle) ──────────────────
+  const fetchHistGraph = (tanggal, session_id) => {
+    setHistGraphData(null);
+    setHistGraphError("");
+    setHistGraphLoading(true);
+    const url = session_id
+      ? `${API_HISTORY_DATA}?session_id=${session_id}&t=${Date.now()}`
+      : `${API_HISTORY_DATA}?date=${tanggal}&t=${Date.now()}`;
+    fetch(url)
+      .then(async r => {
+        const text = await r.text();
+        if (!r.ok) {
+          throw new Error(`Server ${r.status}: ${text.substring(0,200)}`);
+        }
+        try { return JSON.parse(text); }
+        catch(e) { throw new Error("Response bukan JSON valid: " + text.substring(0,200)); }
+      })
+      .then(d => {
+        if (d && d.error) {
+          setHistGraphError(d.error);
+          setHistGraphData(null);
+        } else if (!d || !Array.isArray(d.bpm_data) || d.bpm_data.length === 0) {
+          setHistGraphError("Sesi ini tidak memiliki data grafik tersimpan.");
+          setHistGraphData(null);
+        } else {
+          setHistGraphData(d);
+        }
+        setHistGraphLoading(false);
+      })
+      .catch(err => {
+        console.error("fetchHistGraph error:", err);
+        setHistGraphError(err.message || "Gagal memuat data grafik.");
+        setHistGraphLoading(false);
+      });
+  };
+
+  // ── Toggle expand-collapse dari klik card riwayat ─────────────
+  const loadHistGraph = (tanggal, session_id) => {
+    const key = session_id ? String(session_id) : tanggal;
+    if (selectedDate === key) {
+      // Klik kedua → tutup
+      setSelectedDate(null);
+      setHistGraphData(null);
+      setHistGraphError("");
+      return;
+    }
+    setSelectedDate(key);
+    fetchHistGraph(tanggal, session_id);
+  };
+
+  // ── Demo Mode ─────────────────────────────────────────────────
+  const startDemo = () => {
+    const demoPasien = {
+      id: 0,
+      nama: "Siti Rahayu (Demo)",
+      tanggal_lahir: "1998-03-15",
+      no_rekam_medis: "RM-DEMO-001",
+      usia_kehamilan: "36",
+      nama_suami: "Budi Santoso",
+      no_telp: "08123456789",
+      catatan: "Pasien simulasi mode demo"
+    };
+    setDemoMode(true);
+    setUser({ name: "Dr. Demo", role: "Mode Demo" });
+    setSelectedPatient(demoPasien);
+    setPage("dashboard");
+    setTab("monitor");
+    setBpm(null); setToco(null); setBpmH([]); setTocoH([]); setBmIdxs([]); setLastBm(null); setBpmFull([]); setTocoFull([]); setBmIdxsFull([]);
+
+    // Simulasi data bergerak seperti alat nyata
+    let tick = 0;
+    let baseBpm = 135, baseToco = 20;
+    demoIntervalRef.current = setInterval(() => {
+      tick++;
+      // Variasi sinusoidal + noise acak agar terlihat realistis
+      const nb = Math.round(baseBpm + Math.sin(tick * 0.07) * 12 + (Math.random() - 0.5) * 6);
+      const nt = Math.round(baseToco + Math.sin(tick * 0.04) * 18 + (Math.random() - 0.5) * 4);
+      const bpmVal  = Math.max(105, Math.min(175, nb));
+      const tocoVal = Math.max(5,   Math.min(80,  nt));
+
+      setBpm(bpmVal);
+      setToco(tocoVal);
+      setBpmH(h => [...h.slice(-179), bpmVal]);
+      setTocoH(h => [...h.slice(-179), tocoVal]);
+      setBpmFull(h => [...h, bpmVal]);
+      setTocoFull(h => [...h, tocoVal]);
+      setOnline(true);
+      setFhrOnline(true); setTocoOnline(true);
+      setLastUpdateStr(new Date().toLocaleTimeString("id-ID", { hour:"2-digit", minute:"2-digit", second:"2-digit" }));
+
+      // Simulasi bookmark tiap ~15 detik
+      if (tick % 30 === 0) {
+        setBmIdxs(prev => [...prev, bpmHLenRef.current]);
+        setBpmFull(h => { setBmIdxsFull(prev => [...prev, h.length - 1]); return h; });
+        setLastBm(new Date().toLocaleTimeString("id-ID", { hour:"2-digit", minute:"2-digit", second:"2-digit" }));
+      }
+    }, POLL_MS);
+  };
+
+  const stopDemo = () => {
+    if (demoIntervalRef.current) { clearInterval(demoIntervalRef.current); demoIntervalRef.current = null; }
+    setDemoMode(false);
+    setUser(null);
+    setSelectedPatient(null);
+    setPage("login");
+    setBpm(null); setToco(null); setBpmH([]); setTocoH([]); setBmIdxs([]); setLastBm(null); setBpmFull([]); setTocoFull([]); setBmIdxsFull([]);
+    setOnline(false);
+    setFhrOnline(false); setTocoOnline(false);
+    setRecording(false); setSessionId(null); setSessionStartedAt(null); setRecDuration(0);
+  };
+
+  const login = () => {
+    if (loginU === "dokter" && loginP === "nst2026") {
+      setUser({ name:"Dr. Admin", role:"Dokter Spesialis" });
+      setPage("pilih_pasien"); setLoginErr("");
+    } else {
+      setLoginErr("Username atau password salah.");
+    }
+  };
+
+  // Load patient list
+  const loadPatients = () => {
+    setPatientLoading(true);
+    fetch(API_PATIENTS + "?t=" + Date.now())
+      .then(r => r.json())
+      .then(d => { setPatientList(Array.isArray(d) ? d : []); setPatientLoading(false); })
+      .catch(() => { setPatientList([]); setPatientLoading(false); });
+  };
+
+  // Save new patient
+  const saveNewPasien = async () => {
+    if (!newPasien.nama.trim())              { setPasienErr("Nama pasien wajib diisi."); return; }
+    if (!newPasien.tanggal_lahir.trim())     { setPasienErr("Tanggal lahir wajib diisi."); return; }
+    if (!newPasien.no_rekam_medis.trim())    { setPasienErr("No. Rekam Medis wajib diisi."); return; }
+    if (!newPasien.usia_kehamilan.toString().trim()) { setPasienErr("Usia kehamilan wajib diisi."); return; }
+
+    // Cek duplikat No. Rekam Medis (prioritas utama — harus unik)
+    const dupRM = patientList.find(p =>
+      p.no_rekam_medis &&
+      p.no_rekam_medis.trim().toLowerCase() === newPasien.no_rekam_medis.trim().toLowerCase()
+    );
+    if (dupRM) {
+      setPasienErr(`No. Rekam Medis "${newPasien.no_rekam_medis}" sudah terdaftar atas nama ${dupRM.nama}.`);
+      return;
+    }
+
+    // Cek duplikat Nama (peringatan — nama bisa sama tapi beda orang, tetap blok)
+    const dupNama = patientList.find(p =>
+      p.nama.trim().toLowerCase() === newPasien.nama.trim().toLowerCase()
+    );
+    if (dupNama) {
+      setPasienErr(`Nama "${newPasien.nama}" sudah terdaftar dengan No. RM ${dupNama.no_rekam_medis || "-"}. Jika ini pasien berbeda, gunakan nama yang lebih spesifik.`);
+      return;
+    }
+
+    setSavingPasien(true); setPasienErr("");
+    try {
+      const res = await fetch(API_PATIENTS, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(newPasien)
+      });
+      // Cek jika server return halaman error (bukan JSON)
+      const contentType = res.headers.get("content-type") || "";
+      if (!contentType.includes("application/json")) {
+        const text = await res.text();
+        setPasienErr("Server error (bukan JSON): " + text.substring(0, 120));
+        setSavingPasien(false);
+        return;
+      }
+      const data = await res.json();
+      if (data.status === "ok") {
+        await loadPatients();
+        setShowAddForm(false);
+        setNewPasien({ nama:"", tanggal_lahir:"", no_rekam_medis:"", usia_kehamilan:"", nama_suami:"", no_telp:"", catatan:"" });
+      } else {
+        setPasienErr(data.error || "Gagal menyimpan.");
+      }
+    } catch (err) {
+      setPasienErr("Koneksi gagal. Cek: (1) URL API sudah benar, (2) file patients.php sudah diupload, (3) config.php sudah diisi.");
+      console.error("saveNewPasien error:", err);
+    }
+    setSavingPasien(false);
+  };
+
+  // Select patient & go to dashboard
+  const pilihPasien = (p) => {
+    setSelectedPatient(p);
+    setPage("dashboard");
+    setTab("monitor");
+    // Reset live data
+    setBpm(null); setToco(null); setBpmH([]); setTocoH([]); setBmIdxs([]); setLastBm(null); setBpmFull([]); setTocoFull([]); setBmIdxsFull([]);
+    setRecording(false); setSessionId(null); setSessionStartedAt(null); setRecDuration(0);
+    // Beritahu server pasien mana yang aktif → ESP32 akan ambil otomatis
+    fetch(API_ACTIVE, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({patient_id: p.id})
+    }).catch(() => {});
+  };
+
+
+
+
+  const exportPDF = () => {
+    const nF = bpmFull.length;
+    if (nF === 0) return;
+
+    // Durasi: prioritas lastRecDuration > recDuration > hitungan titik
+    const durSec = lastRecDuration > 0 ? lastRecDuration
+                 : recDuration > 0     ? recDuration
+                 : Math.round(nF * DATA_INTERVAL_S);
+
+    const avgBpm  = Math.round(bpmFull.reduce((a,b)=>a+b,0)/nF);
+    const avgToco = tocoFull.length ? Math.round(tocoFull.reduce((a,b)=>a+b,0)/tocoFull.length) : null;
+
+    const now = new Date();
+    const durStr = durSec < 60
+      ? durSec + " dtk"
+      : Math.floor(durSec/60) + " mnt" + (durSec%60 ? " " + durSec%60 + " dtk" : "");
+
+    // Jam mulai: ambil dari sessionStartedAt jika ada, fallback ke jam sekarang
+    const jamMulai = sessionStartedAt
+      ? new Date(sessionStartedAt).toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit"})
+      : now.toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit"});
+
+    const namaFile = "NST_"+((selectedPatient?.nama||"Pasien").replace(/ /g,"_"))+"_"+now.toISOString().slice(0,10)+".pdf";
+
+    const blob = generateNSTPDF({
+      bpmArr: bpmFull, tocoArr: tocoFull, bmIdxs: bmIdxsFull, durSec,
+      avgBpm, avgToco,
+      namaP:    selectedPatient?.nama           || "-",
+      rmP:      selectedPatient?.no_rekam_medis || "-",
+      usiaP:    selectedPatient?.usia_kehamilan ? selectedPatient.usia_kehamilan+" minggu" : "-",
+      catatanP: selectedPatient?.catatan        || "",
+      tglSesi:  now.toLocaleDateString("id-ID",{day:"2-digit",month:"long",year:"numeric"}),
+      jamSesi:  jamMulai,
+      durStr, bmStr: bmIdxsFull.length+"x", namaFile,
+      returnBlob: true,
+    });
+    // Simpan blob ke state agar riwayat bisa download langsung tanpa render ulang
+    if (blob) {
+      setLastPdfBlob(blob);
+      setLastPdfName(namaFile);
+      // Langsung download juga
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = namaFile; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    }
+  };
+
+  // Format durasi detik → "mm:ss" atau "hh:mm:ss"
+  const fmtDurasi = (sec) => {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+    return `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+  };
+
+  // Hitung usia dari tanggal lahir
+  const hitungUsia = (tgl) => {
+    if (!tgl) return "-";
+    const d = new Date(tgl), now = new Date();
+    return Math.floor((now - d) / (1000*60*60*24*365.25)) + " tahun";
+  };
+
+  // ════════════════════════════════════════════════════════════
+  //  LOGIN PAGE
+  // ════════════════════════════════════════════════════════════
+  // ══════════════════════════════════════════════════════════════
+  //   LANDING PAGE
+  // ══════════════════════════════════════════════════════════════
+  if (page === "landing") return <LandingPage onLogin={() => setPage("login")} />;
+
+  if (page === "login") return (
+    <div style={{
+      minHeight:"100vh", fontFamily:F,
+      background:"linear-gradient(135deg,#fff5f0,#fef9f5 40%,#f0f9ff)",
+      display:"flex", alignItems:"center", justifyContent:"center",
+    }}>
+      {/* Dekoratif */}
+      <div style={{position:"fixed",top:-80,right:-80,width:280,height:280,borderRadius:"50%",
+        background:"radial-gradient(circle,rgba(253,186,116,.35),transparent 70%)",pointerEvents:"none"}} />
+      <div style={{position:"fixed",bottom:-80,left:-60,width:320,height:320,borderRadius:"50%",
+        background:"radial-gradient(circle,rgba(186,230,253,.4),transparent 70%)",pointerEvents:"none"}} />
+
+      <div style={{
+        width:420, background:"rgba(255,255,255,.92)", backdropFilter:"blur(20px)",
+        borderRadius:28, padding:"48px 44px",
+        boxShadow:"0 20px 60px rgba(0,0,0,.08),0 0 0 1px rgba(253,186,116,.2)",
+        animation:"fadeSlideIn .5s ease",
+      }}>
+        <div style={{textAlign:"center",marginBottom:30}}>
+          {/* Kemenkes branding strip */}
+          <div style={{
+            background:"linear-gradient(135deg,#0e7490,#0891b2)",
+            borderRadius:18, padding:"16px 20px 12px", marginBottom:16,
+            boxShadow:"0 8px 28px rgba(8,145,178,.3)",
+          }}>
+            <img src={KEMENKES_LOGO} alt="Kemenkes" style={{width:52,height:52,objectFit:"contain",marginBottom:6}} />
+            <div style={{color:"#fff",fontSize:8,fontWeight:700,letterSpacing:1.5,fontFamily:M}}>KEMENTERIAN KESEHATAN RI</div>
+          </div>
+          <h1 style={{fontSize:24,fontWeight:900,color:"#1e293b",letterSpacing:-.5}}>NST Monitor</h1>
+          <p style={{fontSize:11,color:"#0891b2",marginTop:4,letterSpacing:1,fontFamily:M,fontWeight:700}}>SISTEM PEMANTAUAN NON-STRESS TEST</p>
+        </div>
+
+        {[
+          {l:"Username", t:"text",     v:loginU, fn:setLoginU, ph:"Masukkan username"},
+          {l:"Password", t:"password", v:loginP, fn:setLoginP, ph:"••••••••"},
+        ].map(({l,t,v,fn,ph}) => (
+          <div key={l} style={{marginBottom:18}}>
+            <label style={{display:"block",fontSize:12,fontWeight:700,color:"#64748b",marginBottom:7}}>{l}</label>
+            <input type={t} placeholder={ph} value={v}
+              onChange={e => fn(e.target.value)}
+              onKeyDown={e => e.key==="Enter" && login()}
+              style={{
+                width:"100%", padding:"13px 16px", background:"#f8fafc",
+                border:"2px solid #e2e8f0", borderRadius:12,
+                fontSize:14, fontFamily:F, outline:"none", color:"#1e293b",
+              }}
+              onFocus={e=>e.target.style.borderColor="#fda4af"}
+              onBlur={e=>e.target.style.borderColor="#e2e8f0"}
+            />
+          </div>
+        ))}
+
+        {loginErr && <p style={{color:"#ef4444",fontSize:12,marginBottom:12,textAlign:"center",fontWeight:700}}>{loginErr}</p>}
+
+        <button onClick={login} style={{
+          width:"100%", padding:14,
+          background:"linear-gradient(135deg,#fb7185,#f43f5e)",
+          border:"none", borderRadius:14, color:"#fff",
+          fontFamily:F, fontSize:15, fontWeight:800, cursor:"pointer",
+          boxShadow:"0 8px 24px rgba(244,63,94,.35)",
+        }}>Masuk ke Sistem 🌸</button>
+
+        <div style={{display:"flex",alignItems:"center",gap:10,margin:"18px 0 4px"}}>
+          <div style={{flex:1,height:1,background:"#e2e8f0"}}/>
+          <span style={{fontSize:11,color:"#94a3b8",fontWeight:600}}>atau</span>
+          <div style={{flex:1,height:1,background:"#e2e8f0"}}/>
+        </div>
+
+        <button onClick={startDemo} style={{
+          width:"100%", padding:12,
+          background:"linear-gradient(135deg,#f0f9ff,#e0f2fe)",
+          border:"2px dashed #7dd3fc", borderRadius:14, color:"#0369a1",
+          fontFamily:F, fontSize:13, fontWeight:800, cursor:"pointer",
+          letterSpacing:.3,
+        }}>🎮 Coba Mode Demo (tanpa alat)</button>
+        <p style={{textAlign:"center",fontSize:10,color:"#94a3b8",marginTop:8}}>
+          Data simulasi — tidak memerlukan ESP32 atau database
+        </p>
+
+      </div>
+    </div>
+  );
+
+  // ════════════════════════════════════════════════════════════
+  //  PILIH PASIEN PAGE
+  // ════════════════════════════════════════════════════════════
+  if (page === "pilih_pasien") {
+    const filtered = patientList.filter(p =>
+      p.nama.toLowerCase().includes(patientSearch.toLowerCase()) ||
+      (p.no_rekam_medis||"").toLowerCase().includes(patientSearch.toLowerCase())
+    );
+
+    const inputStyle = {
+      width:"100%", padding:"11px 14px", background:"#f8fafc",
+      border:"2px solid #e2e8f0", borderRadius:10, fontSize:13,
+      fontFamily:F, outline:"none", color:"#1e293b",
+    };
+
+    return (
+      <div style={{ minHeight:"100vh", fontFamily:F, background:"linear-gradient(135deg,#fff5f0,#fef9f5 40%,#f0f9ff)" }}>
+        {/* Blobs dekoratif */}
+        <div style={{position:"fixed",top:-60,right:-60,width:260,height:260,borderRadius:"50%",
+          background:"radial-gradient(circle,rgba(253,186,116,.3),transparent 70%)",pointerEvents:"none"}}/>
+        <div style={{position:"fixed",bottom:-60,left:-60,width:280,height:280,borderRadius:"50%",
+          background:"radial-gradient(circle,rgba(186,230,253,.35),transparent 70%)",pointerEvents:"none"}}/>
+
+        {/* Topbar */}
+        <div style={{background:"rgba(255,255,255,.88)",backdropFilter:"blur(16px)",
+          borderBottom:"1px solid rgba(0,0,0,.06)",padding:"12px 28px",
+          display:"flex",alignItems:"center",justifyContent:"space-between",
+          boxShadow:"0 2px 16px rgba(0,0,0,.05)"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={{
+              width:42, height:42, borderRadius:12,
+              background:"linear-gradient(135deg,#0e7490,#0891b2)",
+              display:"flex", alignItems:"center", justifyContent:"center",
+              boxShadow:"0 4px 14px rgba(8,145,178,.35)", flexShrink:0,
+            }}>
+              <img src={KEMENKES_LOGO} alt="Kemenkes" style={{width:30,height:30,objectFit:"contain"}} />
+            </div>
+            <div>
+              <div style={{fontWeight:900,fontSize:15,color:"#0e7490",letterSpacing:-.3}}>NST Monitor</div>
+              <div style={{fontSize:8,color:"#0891b2",fontFamily:M,letterSpacing:1.2,fontWeight:700}}>KEMENKES RI · NON-STRESS TEST</div>
+            </div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#334155"}}>{user?.name}</div>
+            <button onClick={()=>setPage("landing")} style={{padding:"8px 16px",background:"#fff1f2",
+              border:"1px solid #fecdd3",borderRadius:10,color:"#f43f5e",
+              fontFamily:F,fontSize:12,fontWeight:700,cursor:"pointer"}}>Keluar</button>
+          </div>
+        </div>
+
+        <div style={{maxWidth:800,margin:"40px auto",padding:"0 24px"}}>
+          {/* Header */}
+          <div style={{textAlign:"center",marginBottom:32}}>
+            <div style={{fontSize:36,marginBottom:8}}>🏥</div>
+            <h1 style={{fontSize:24,fontWeight:900,color:"#1e293b",letterSpacing:-.5}}>Pilih Pasien</h1>
+            <p style={{fontSize:13,color:"#94a3b8",marginTop:6}}>
+              Pilih pasien yang sudah terdaftar, atau tambahkan pasien baru
+            </p>
+          </div>
+
+          {/* Search + Tombol Tambah */}
+          <div style={{display:"flex",gap:12,marginBottom:20}}>
+            <div style={{flex:1,position:"relative"}}>
+              <span style={{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)",fontSize:16}}>🔍</span>
+              <input
+                placeholder="Cari nama atau no. rekam medis..."
+                value={patientSearch}
+                onChange={e=>setPatientSearch(e.target.value)}
+                style={{...inputStyle,paddingLeft:40,borderRadius:12}}
+                onFocus={e=>e.target.style.borderColor="#fda4af"}
+                onBlur={e=>e.target.style.borderColor="#e2e8f0"}
+              />
+            </div>
+            <button onClick={()=>{setShowAddForm(f=>!f);setPasienErr("");}} style={{
+              padding:"11px 22px",background:"linear-gradient(135deg,#fb7185,#f43f5e)",
+              border:"none",borderRadius:12,color:"#fff",fontFamily:F,
+              fontSize:13,fontWeight:800,cursor:"pointer",whiteSpace:"nowrap",
+              boxShadow:"0 4px 16px rgba(244,63,94,.35)",
+            }}>+ Pasien Baru</button>
+          </div>
+
+          {/* Form Tambah Pasien */}
+          {showAddForm && (
+            <div style={{
+              background:"#fff",borderRadius:20,padding:"24px",
+              border:"2px solid #fda4af",marginBottom:20,
+              animation:"fadeSlideIn .3s ease",
+              boxShadow:"0 8px 32px rgba(253,164,175,.2)",
+            }}>
+              <h3 style={{fontSize:16,fontWeight:800,color:"#1e293b",marginBottom:20}}>
+                ✏️ Data Pasien Baru
+              </h3>
+
+              {/* Row 1: Nama + Tgl Lahir */}
+              <div style={{display:"flex",gap:14,marginBottom:14}}>
+                <div style={{flex:2}}>
+                  <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",marginBottom:6}}>
+                    NAMA LENGKAP <span style={{color:"#f43f5e"}}>*</span>
+                  </label>
+                  <input placeholder="Masukkan nama lengkap" value={newPasien.nama}
+                    onChange={e=>setNewPasien(p=>({...p,nama:e.target.value}))}
+                    style={inputStyle}
+                    onFocus={e=>e.target.style.borderColor="#fda4af"}
+                    onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
+                </div>
+                <div style={{flex:1}}>
+                  <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",marginBottom:6}}>
+                    TANGGAL LAHIR <span style={{color:"#f43f5e"}}>*</span>
+                  </label>
+                  <input type="date" value={newPasien.tanggal_lahir}
+                    onChange={e=>setNewPasien(p=>({...p,tanggal_lahir:e.target.value}))}
+                    style={inputStyle}
+                    onFocus={e=>e.target.style.borderColor="#fda4af"}
+                    onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
+                </div>
+              </div>
+
+              {/* Row 2: No RM + Usia Kehamilan */}
+              <div style={{display:"flex",gap:14,marginBottom:14}}>
+                <div style={{flex:1}}>
+                  <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",marginBottom:6}}>NO. REKAM MEDIS <span style={{color:"#f43f5e"}}>*</span></label>
+                  <input placeholder="Contoh: RM-001" value={newPasien.no_rekam_medis}
+                    onChange={e=>setNewPasien(p=>({...p,no_rekam_medis:e.target.value}))}
+                    style={inputStyle}
+                    onFocus={e=>e.target.style.borderColor="#fda4af"}
+                    onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
+                </div>
+                <div style={{flex:1}}>
+                  <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",marginBottom:6}}>
+                    USIA KEHAMILAN (minggu) <span style={{color:"#f43f5e"}}>*</span>
+                  </label>
+                  <input type="number" min="1" max="45" placeholder="Contoh: 32"
+                    value={newPasien.usia_kehamilan}
+                    onChange={e=>setNewPasien(p=>({...p,usia_kehamilan:e.target.value}))}
+                    style={inputStyle}
+                    onFocus={e=>e.target.style.borderColor="#fda4af"}
+                    onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
+                </div>
+              </div>
+
+              {/* Row 3: Nama Suami + No Telp */}
+              <div style={{display:"flex",gap:14,marginBottom:14}}>
+                <div style={{flex:1}}>
+                  <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",marginBottom:6}}>NAMA SUAMI / WALI</label>
+                  <input placeholder="Opsional" value={newPasien.nama_suami}
+                    onChange={e=>setNewPasien(p=>({...p,nama_suami:e.target.value}))}
+                    style={inputStyle}
+                    onFocus={e=>e.target.style.borderColor="#fda4af"}
+                    onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
+                </div>
+                <div style={{flex:1}}>
+                  <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",marginBottom:6}}>NO. TELEPON</label>
+                  <input placeholder="Opsional" value={newPasien.no_telp}
+                    onChange={e=>setNewPasien(p=>({...p,no_telp:e.target.value}))}
+                    style={inputStyle}
+                    onFocus={e=>e.target.style.borderColor="#fda4af"}
+                    onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
+                </div>
+              </div>
+
+              {/* Catatan */}
+              <div style={{marginBottom:18}}>
+                <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748b",marginBottom:6}}>CATATAN TAMBAHAN</label>
+                <textarea placeholder="Riwayat, kondisi khusus, dll. (opsional)"
+                  value={newPasien.catatan}
+                  onChange={e=>setNewPasien(p=>({...p,catatan:e.target.value}))}
+                  rows={2}
+                  style={{...inputStyle,resize:"vertical",lineHeight:1.6}}
+                  onFocus={e=>e.target.style.borderColor="#fda4af"}
+                  onBlur={e=>e.target.style.borderColor="#e2e8f0"}/>
+              </div>
+
+              {pasienErr && <p style={{color:"#ef4444",fontSize:12,marginBottom:12,fontWeight:700}}>{pasienErr}</p>}
+
+              <div style={{display:"flex",gap:10}}>
+                <button onClick={saveNewPasien} disabled={savingPasien} style={{
+                  padding:"12px 28px",background:"linear-gradient(135deg,#fb7185,#f43f5e)",
+                  border:"none",borderRadius:10,color:"#fff",fontFamily:F,
+                  fontSize:13,fontWeight:800,cursor:"pointer",
+                  opacity: savingPasien ? 0.6 : 1,
+                }}>
+                  {savingPasien ? "Menyimpan…" : "💾 Simpan Pasien"}
+                </button>
+                <button onClick={()=>{setShowAddForm(false);setPasienErr("");}} style={{
+                  padding:"12px 20px",background:"#f1f5f9",border:"none",
+                  borderRadius:10,color:"#64748b",fontFamily:F,
+                  fontSize:13,fontWeight:700,cursor:"pointer",
+                }}>Batal</button>
+              </div>
+            </div>
+          )}
+
+          {/* Daftar Pasien */}
+          {patientLoading ? (
+            <div style={{textAlign:"center",padding:40}}>
+              <div style={{width:36,height:36,margin:"0 auto",border:"4px solid #fecdd3",
+                borderTopColor:"#f43f5e",borderRadius:"50%",animation:"spin .8s linear infinite"}}/>
+              <p style={{marginTop:12,color:"#94a3b8",fontSize:13}}>Memuat data pasien…</p>
+            </div>
+          ) : filtered.length === 0 ? (
+            <div style={{textAlign:"center",padding:"50px 0",color:"#94a3b8"}}>
+              <div style={{fontSize:40,marginBottom:12}}>🔍</div>
+              <div style={{fontSize:14,fontWeight:700}}>
+                {patientSearch ? "Pasien tidak ditemukan" : "Belum ada pasien terdaftar"}
+              </div>
+              <div style={{fontSize:12,marginTop:6}}>
+                {patientSearch ? "Coba kata kunci lain" : "Klik + Pasien Baru untuk menambahkan"}
+              </div>
+            </div>
+          ) : (
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              <div style={{fontSize:11,color:"#94a3b8",marginBottom:4}}>
+                {filtered.length} pasien ditemukan — klik untuk memulai pemeriksaan
+              </div>
+              {filtered.map(p => (
+                <div key={p.id} className="card-h" onClick={()=>pilihPasien(p)} style={{
+                  background:"rgba(255,255,255,.9)",backdropFilter:"blur(10px)",
+                  border:"2px solid rgba(0,0,0,.06)",borderRadius:18,padding:"18px 22px",
+                  cursor:"pointer",display:"flex",alignItems:"center",gap:16,
+                  boxShadow:"0 2px 12px rgba(0,0,0,.05)",
+                }}>
+                  {/* Avatar */}
+                  <div style={{
+                    width:52,height:52,borderRadius:"50%",flexShrink:0,
+                    background:"linear-gradient(135deg,#fecdd3,#fda4af)",
+                    display:"flex",alignItems:"center",justifyContent:"center",
+                    fontSize:24,boxShadow:"0 4px 12px rgba(253,164,175,.4)",
+                  }}>👩</div>
+
+                  {/* Info utama */}
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:800,color:"#1e293b",fontSize:15,marginBottom:3}}>{p.nama}</div>
+                    <div style={{fontSize:11,color:"#94a3b8",display:"flex",gap:14,flexWrap:"wrap"}}>
+                      {p.no_rekam_medis && <span>📋 {p.no_rekam_medis}</span>}
+                      <span>🎂 {hitungUsia(p.tanggal_lahir)}</span>
+                      {p.usia_kehamilan && <span>🤰 {p.usia_kehamilan} minggu</span>}
+                      {p.no_telp && <span>📱 {p.no_telp}</span>}
+                    </div>
+                  </div>
+
+                  {/* Badge riwayat */}
+                  <div style={{display:"flex",gap:10,flexShrink:0,alignItems:"center"}}>
+                    {p.jumlah_sesi > 0 ? (
+                      <div style={{textAlign:"center",padding:"6px 14px",
+                        background:"rgba(134,239,172,.15)",border:"1px solid #86efac",borderRadius:50}}>
+                        <div style={{fontSize:14,fontWeight:900,color:"#16a34a"}}>{p.jumlah_sesi}×</div>
+                        <div style={{fontSize:9,color:"#4ade80",fontFamily:M}}>pemeriksaan</div>
+                      </div>
+                    ) : (
+                      <div style={{textAlign:"center",padding:"6px 14px",
+                        background:"rgba(148,163,184,.1)",border:"1px solid #e2e8f0",borderRadius:50}}>
+                        <div style={{fontSize:12,fontWeight:700,color:"#94a3b8"}}>Baru</div>
+                        <div style={{fontSize:9,color:"#cbd5e1",fontFamily:M}}>belum pernah</div>
+                      </div>
+                    )}
+                    <span style={{fontSize:20,color:"#e2e8f0"}}>›</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  DASHBOARD
+  // ════════════════════════════════════════════════════════════
+  const alarmH = alarmMsgs.length ? 50 : 0;
+
+  return (
+    <div style={{minHeight:"100vh", fontFamily:F, background:"#f8f4ef"}}>
+      <Alarm msgs={alarmMsgs} />
+      <div style={{height:alarmH, transition:"height .3s"}} />
+
+      {/* ── Topbar ── */}
+      <div style={{
+        background:"rgba(255,255,255,.88)", backdropFilter:"blur(16px)",
+        borderBottom:"1px solid rgba(0,0,0,.06)",
+        padding:"12px 28px", display:"flex", alignItems:"center", justifyContent:"space-between",
+        position:"sticky", top:alarmH, zIndex:100,
+        boxShadow:"0 2px 16px rgba(0,0,0,.05)",
+      }}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          {/* Logo Kemenkes */}
+          <div style={{
+            width:42, height:42, borderRadius:12,
+            background:"linear-gradient(135deg,#0e7490,#0891b2)",
+            display:"flex", alignItems:"center", justifyContent:"center",
+            boxShadow:"0 4px 14px rgba(8,145,178,.35)",
+            flexShrink:0,
+          }}>
+            <img src={KEMENKES_LOGO} alt="Kemenkes" style={{width:30,height:30,objectFit:"contain"}} />
+          </div>
+          <div>
+            <div style={{fontWeight:900,fontSize:15,color:"#0e7490",letterSpacing:-.3}}>NST Monitor</div>
+            <div style={{fontSize:8,color:"#0891b2",fontFamily:M,letterSpacing:1.2,fontWeight:700}}>KEMENKES RI · NON-STRESS TEST</div>
+          </div>
+        </div>
+
+        {/* Indikator koneksi alat — 2 ESP32 terpisah */}
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+          {/* Indikator online — aktif jika salah satu sensor mengirim data */}
+          <div style={{
+            display:"flex", alignItems:"center", gap:8,
+            background: online ? "rgba(220,252,231,.85)" : "rgba(254,242,242,.85)",
+            border:`1px solid ${online ? "#86efac" : "#fca5a5"}`,
+            borderRadius:50, padding:"7px 16px",
+          }}>
+            <div style={{
+              width:9, height:9, borderRadius:"50%",
+              background: online ? "#22c55e" : "#ef4444",
+              boxShadow: online ? "0 0 0 3px rgba(34,197,94,.3)" : "none",
+              animation: online ? "pulse-ring 1.5s ease-out infinite" : "none",
+            }} />
+            <span style={{fontSize:11,fontWeight:700,color:online?"#15803d":"#b91c1c",fontFamily:M}}>
+              {online ? (demoMode ? "SIMULASI AKTIF" : "DATA MASUK") : (demoMode ? "MEMULAI…" : "MENUNGGU…")}
+            </span>
+            {online && lastUpdateStr &&
+              <span style={{fontSize:9,color:"#6b7280",fontFamily:M}}> · {lastUpdateStr}</span>
+            }
+          </div>
+          {/* Badge per-sensor FHR */}
+          {!demoMode && (
+            <div style={{
+              display:"flex", alignItems:"center", gap:5,
+              background: fhrOnline ? "rgba(255,241,242,.9)" : "rgba(248,250,252,.9)",
+              border:`1px solid ${fhrOnline ? "#fca5a5" : "#e2e8f0"}`,
+              borderRadius:50, padding:"5px 12px",
+            }}>
+              <div style={{
+                width:7, height:7, borderRadius:"50%",
+                background: fhrOnline ? "#ef4444" : "#cbd5e1",
+                animation: fhrOnline ? "pulse-ring 1.8s ease-out infinite" : "none",
+              }}/>
+              <span style={{fontSize:10,fontWeight:700,fontFamily:M,
+                color: fhrOnline ? "#b91c1c" : "#94a3b8"}}>
+                ❤ FHR {fhrOnline ? "●" : "○"}
+              </span>
+            </div>
+          )}
+          {/* Badge per-sensor TOCO */}
+          {!demoMode && (
+            <div style={{
+              display:"flex", alignItems:"center", gap:5,
+              background: tocoOnline ? "rgba(240,249,255,.9)" : "rgba(248,250,252,.9)",
+              border:`1px solid ${tocoOnline ? "#7dd3fc" : "#e2e8f0"}`,
+              borderRadius:50, padding:"5px 12px",
+            }}>
+              <div style={{
+                width:7, height:7, borderRadius:"50%",
+                background: tocoOnline ? "#0ea5e9" : "#cbd5e1",
+                animation: tocoOnline ? "pulse-ring 1.8s ease-out infinite" : "none",
+              }}/>
+              <span style={{fontSize:10,fontWeight:700,fontFamily:M,
+                color: tocoOnline ? "#0369a1" : "#94a3b8"}}>
+                🌊 TOCO {tocoOnline ? "●" : "○"}
+              </span>
+            </div>
+          )}
+          {/* Badge status MQTT */}
+          {!demoMode && (
+            <div style={{
+              display:"flex", alignItems:"center", gap:5,
+              background: mqttStatus==="connected" ? "rgba(240,253,244,.9)" : mqttStatus==="connecting" ? "rgba(255,251,235,.9)" : "rgba(255,241,242,.9)",
+              border:`1px solid ${mqttStatus==="connected" ? "#86efac" : mqttStatus==="connecting" ? "#fde68a" : "#fca5a5"}`,
+              borderRadius:50, padding:"5px 12px",
+            }}>
+              <div style={{
+                width:7, height:7, borderRadius:"50%",
+                background: mqttStatus==="connected" ? "#22c55e" : mqttStatus==="connecting" ? "#f59e0b" : "#ef4444",
+                animation: mqttStatus==="connecting" ? "spin 1s linear infinite" : "none",
+              }}/>
+              <span style={{fontSize:10,fontWeight:700,fontFamily:M,
+                color: mqttStatus==="connected" ? "#15803d" : mqttStatus==="connecting" ? "#92400e" : "#b91c1c"}}>
+                {mqttStatus==="connected" ? "MQTT ✓" : mqttStatus==="connecting" ? "MQTT…" : "MQTT ✗"}
+              </span>
+            </div>
+          )}
+        </div>
+
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          {demoMode && (
+            <div style={{
+              background:"linear-gradient(135deg,#dbeafe,#bfdbfe)",
+              border:"1.5px dashed #3b82f6", borderRadius:50,
+              padding:"5px 14px", fontSize:11, fontWeight:800,
+              color:"#1d4ed8", fontFamily:M, letterSpacing:.5,
+            }}>🎮 MODE DEMO</div>
+          )}
+          {/* Badge RECORDING */}
+          {recording && !demoMode && (
+            <div style={{
+              display:"flex", alignItems:"center", gap:7,
+              background:"linear-gradient(135deg,#fee2e2,#fecaca)",
+              border:"1.5px solid #ef4444", borderRadius:50,
+              padding:"5px 14px", animation:"blink-alarm 1.5s ease-in-out infinite",
+            }}>
+              <div style={{width:8,height:8,borderRadius:"50%",background:"#ef4444",
+                boxShadow:"0 0 0 3px rgba(239,68,68,.4)"}}/>
+              <span style={{fontSize:11,fontWeight:900,color:"#b91c1c",fontFamily:M,letterSpacing:.5}}>
+                REC {fmtDurasi(recDuration)}
+              </span>
+            </div>
+          )}
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#334155"}}>{user?.name}</div>
+            <div style={{fontSize:11,color:"#94a3b8"}}>{user?.role}</div>
+          </div>
+          <button onClick={demoMode ? stopDemo : ()=>setPage("landing")} style={{
+            padding:"8px 16px", background:"#fff1f2",
+            border:"1px solid #fecdd3", borderRadius:10,
+            color:"#f43f5e", fontFamily:F, fontSize:12, fontWeight:700, cursor:"pointer",
+          }}>{demoMode ? "Keluar Demo" : "Keluar"}</button>
+        </div>
+      </div>
+
+      {/* ── Tabs ── */}
+      <div style={{
+        background:"rgba(255,255,255,.7)", backdropFilter:"blur(10px)",
+        borderBottom:"1px solid rgba(0,0,0,.05)",
+        padding:"0 28px", display:"flex", gap:2,
+      }}>
+        {[
+          {id:"monitor", l:"💗 Monitor Live"},
+          {id:"history", l:"📋 Riwayat"},
+          {id:"pasien",  l:"👤 Pasien"},
+          {id:"info",    l:"📖 Panduan"},
+        ].map(t => (
+          <button key={t.id} className="tab-btn" onClick={()=>setTab(t.id)} style={{
+            padding:"14px 22px", border:"none", background:"transparent",
+            fontFamily:F, fontSize:13, fontWeight: tab===t.id ? 900 : 600,
+            cursor:"pointer",
+            color: tab===t.id ? "#f43f5e" : "#94a3b8",
+            borderBottom: tab===t.id ? "3px solid #f43f5e" : "3px solid transparent",
+            transition:"all .2s",
+          }}>{t.l}</button>
+        ))}
+      </div>
+
+      {/* ── Content ── */}
+      <div style={{padding:"24px 28px", maxWidth:1100, margin:"0 auto"}}>
+
+        {/* ══ MONITOR LIVE ══ */}
+        {tab === "monitor" && (
+          <div style={{animation:"fadeSlideIn .35s ease"}}>
+
+            {/* Banner: menunggu alat — tampilkan status per sensor */}
+            {!online && (
+              <div style={{
+                display:"flex", alignItems:"center", gap:12, marginBottom:18,
+                background:"rgba(255,255,255,.85)", border:"1px dashed #fca5a5",
+                borderRadius:14, padding:"14px 20px",
+              }}>
+                <div style={{
+                  width:36, height:36, flexShrink:0,
+                  border:"4px solid #fecdd3", borderTopColor:"#f43f5e",
+                  borderRadius:"50%", animation:"spin .9s linear infinite",
+                }} />
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:800,color:"#b91c1c",fontSize:13}}>
+                    {fhrOnline || tocoOnline ? "Menunggu sensor lainnya…" : "Menunggu alat terhubung…"}
+                  </div>
+                  <div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>
+                    {demoMode
+                      ? "Memulai simulasi…"
+                      : "Setiap sensor tampil segera setelah terhubung WiFi."}
+                  </div>
+                </div>
+                {/* Indikator per-sensor di dalam banner */}
+                {!demoMode && (
+                  <div style={{display:"flex",gap:10,flexShrink:0}}>
+                    <div style={{
+                      display:"flex",flexDirection:"column",alignItems:"center",
+                      padding:"8px 14px",borderRadius:12,
+                      background: fhrOnline ? "rgba(255,241,242,.9)" : "rgba(248,250,252,.9)",
+                      border:`1.5px solid ${fhrOnline ? "#fca5a5" : "#e2e8f0"}`,
+                    }}>
+                      <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3}}>
+                        <div style={{width:7,height:7,borderRadius:"50%",
+                          background: fhrOnline ? "#ef4444" : "#cbd5e1",
+                          animation: fhrOnline ? "pulse-ring 1.5s ease-out infinite" : "none"}}/>
+                        <span style={{fontSize:10,fontWeight:800,fontFamily:M,
+                          color: fhrOnline ? "#b91c1c" : "#94a3b8"}}>❤ FHR</span>
+                      </div>
+                      <span style={{fontSize:9,fontFamily:M,
+                        color: fhrOnline ? "#16a34a" : "#94a3b8",fontWeight:700}}>
+                        {fhrOnline ? "✓ Terhubung" : "Menunggu…"}
+                      </span>
+                    </div>
+                    <div style={{
+                      display:"flex",flexDirection:"column",alignItems:"center",
+                      padding:"8px 14px",borderRadius:12,
+                      background: tocoOnline ? "rgba(240,249,255,.9)" : "rgba(248,250,252,.9)",
+                      border:`1.5px solid ${tocoOnline ? "#7dd3fc" : "#e2e8f0"}`,
+                    }}>
+                      <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3}}>
+                        <div style={{width:7,height:7,borderRadius:"50%",
+                          background: tocoOnline ? "#0ea5e9" : "#cbd5e1",
+                          animation: tocoOnline ? "pulse-ring 1.5s ease-out infinite" : "none"}}/>
+                        <span style={{fontSize:10,fontWeight:800,fontFamily:M,
+                          color: tocoOnline ? "#0369a1" : "#94a3b8"}}>🌊 TOCO</span>
+                      </div>
+                      <span style={{fontSize:9,fontFamily:M,
+                        color: tocoOnline ? "#16a34a" : "#94a3b8",fontWeight:700}}>
+                        {tocoOnline ? "✓ Terhubung" : "Menunggu…"}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Panel STATUS RECORDING — tampil saat online */}
+            {online && !demoMode && (
+              <div style={{
+                display:"flex", alignItems:"center", gap:14, marginBottom:16,
+                borderRadius:16, padding:"14px 20px",
+                background: recording
+                  ? "linear-gradient(135deg,#fef2f2,#fee2e2)"
+                  : "linear-gradient(135deg,#f9fafb,#f3f4f6)",
+                border: recording ? "2px solid #fca5a5" : "2px solid #e5e7eb",
+                boxShadow: recording ? "0 4px 18px rgba(239,68,68,.15)" : "none",
+                transition:"all .4s",
+              }}>
+                {/* Ikon status */}
+                <div style={{
+                  width:50, height:50, borderRadius:"50%", flexShrink:0,
+                  background: recording
+                    ? "linear-gradient(135deg,#fecaca,#fca5a5)"
+                    : "linear-gradient(135deg,#e5e7eb,#d1d5db)",
+                  display:"flex", alignItems:"center", justifyContent:"center",
+                  fontSize:22,
+                  boxShadow: recording ? "0 0 0 4px rgba(239,68,68,.2)" : "none",
+                  animation: recording ? "pulse-ring 1.5s ease-out infinite" : "none",
+                }}>
+                  {recording ? "⏺" : "⏹"}
+                </div>
+
+                {/* Teks status */}
+                <div style={{flex:1}}>
+                  <div style={{
+                    fontSize:14, fontWeight:900,
+                    color: recording ? "#b91c1c" : "#6b7280",
+                  }}>
+                    {recording ? "● MEREKAM DATA" : "○ Standby — Tidak Merekam"}
+                  </div>
+                  <div style={{fontSize:11, color: recording ? "#ef4444" : "#9ca3af", marginTop:3}}>
+                    {recording
+                      ? `Sesi #${sessionId} · Durasi: ${fmtDurasi(recDuration)} · Tekan STOP di alat untuk berhenti`
+                      : "Tekan tombol START di alat untuk mulai merekam sesi"}
+                  </div>
+                </div>
+
+                {/* Durasi besar saat recording */}
+                {recording && (
+                  <div style={{
+                    textAlign:"center", flexShrink:0,
+                    padding:"8px 18px", borderRadius:12,
+                    background:"rgba(239,68,68,.1)", border:"1px solid #fca5a5",
+                  }}>
+                    <div style={{fontSize:26, fontWeight:900, color:"#ef4444", fontFamily:M,
+                      letterSpacing:-1}}>
+                      {fmtDurasi(recDuration)}
+                    </div>
+                    <div style={{fontSize:9, color:"#f87171", fontFamily:M, fontWeight:700, letterSpacing:1}}>
+                      DURASI REC
+                    </div>
+                  </div>
+                )}
+
+                {/* Indikator tombol panduan */}
+                <div style={{display:"flex",gap:8,flexShrink:0}}>
+                  {[
+                    {l:"START", c: recording?"#d1fae5":"#dcfce7", bc:"#86efac", tc:"#15803d", active:!recording},
+                    {l:"STOP",  c: recording?"#fee2e2":"#f3f4f6", bc:"#fca5a5", tc:"#b91c1c", active:recording},
+                    {l:"RESET", c:"#fef9c3", bc:"#fde047", tc:"#a16207", active:false},
+                  ].map(b => (
+                    <div key={b.l} style={{
+                      padding:"6px 12px", borderRadius:8, textAlign:"center",
+                      background: b.c, border:`1.5px solid ${b.bc}`,
+                      opacity: b.active ? 1 : 0.45,
+                    }}>
+                      <div style={{fontSize:9,fontWeight:900,color:b.tc,fontFamily:M}}>{b.l}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Metric cards — selalu tampil */}
+            <div style={{display:"flex",gap:16,marginBottom:20}}>
+
+              {/* BPM */}
+              <div className="card-h" style={{
+                flex:1,
+                background: bpm !== null ? "linear-gradient(135deg,#fff1f2,#ffe4e6)" : "linear-gradient(135deg,#f9fafb,#f3f4f6)",
+                border: bpm !== null ? "2px solid #fecdd3" : "2px solid #e5e7eb",
+                borderRadius:24, padding:"26px 24px",
+                boxShadow: bpm !== null ? "0 8px 28px rgba(253,164,175,.22)" : "none",
+                transition:"all .4s",
+              }}>
+                <div style={{fontSize:10,fontWeight:700,color: bpm !== null ? "#fda4af" : "#9ca3af",letterSpacing:2,fontFamily:M,marginBottom:6}}>
+                  ❤ FETAL HEART RATE
+                </div>
+                <div style={{fontSize:76,fontWeight:900,lineHeight:1,letterSpacing:-3,fontFamily:M,
+                  color: bpm !== null ? "#f43f5e" : "#d1d5db",
+                }}>
+                  {bpm !== null ? bpm : "—"}
+                </div>
+                <div style={{fontSize:13,fontWeight:700,marginTop:4,
+                  color: bpm !== null ? "#fda4af" : "#9ca3af",
+                }}>
+                  {bpm !== null ? "bpm" : "Tidak ada data"}
+                </div>
+                <Bar value={bpm !== null ? bpm-100 : 0} max={80} color={bpm !== null ? "#f43f5e" : "#e5e7eb"} />
+              </div>
+
+              {/* TOCO */}
+              <div className="card-h" style={{
+                flex:1,
+                background: toco !== null ? "linear-gradient(135deg,#f0f9ff,#e0f2fe)" : "linear-gradient(135deg,#f9fafb,#f3f4f6)",
+                border: toco !== null ? "2px solid #bae6fd" : "2px solid #e5e7eb",
+                borderRadius:24, padding:"26px 24px",
+                boxShadow: toco !== null ? "0 8px 28px rgba(186,230,253,.35)" : "none",
+                transition:"all .4s",
+              }}>
+                <div style={{fontSize:10,fontWeight:700,color: toco !== null ? "#7dd3fc" : "#9ca3af",letterSpacing:2,fontFamily:M,marginBottom:6}}>
+                  🌊 KONTRAKSI UTERUS (TOCO)
+                </div>
+                <div style={{fontSize:76,fontWeight:900,lineHeight:1,letterSpacing:-3,fontFamily:M,
+                  color: toco !== null ? "#0ea5e9" : "#d1d5db",
+                }}>
+                  {toco !== null ? toco : "—"}
+                </div>
+                <div style={{fontSize:13,fontWeight:700,marginTop:4,
+                  color: toco !== null ? "#7dd3fc" : "#9ca3af",
+                }}>
+                  {toco !== null ? "unit" : "Tidak ada data"}
+                </div>
+                <Bar value={toco !== null ? toco : 0} max={80} color={toco !== null ? "#0ea5e9" : "#e5e7eb"} />
+              </div>
+
+              {/* Status cards */}
+              <div style={{flex:1,display:"flex",flexDirection:"column",gap:12}}>
+                {bpm !== null
+                  ? <StatCard label="STATUS DJJ"  status={sBPM(bpm)}
+                      icon={isBPMNormal(bpm)?"💚":sBPM(bpm)==="Bradikardi"?"🔵":"🔴"}
+                      detail={`${bpm} bpm · Normal: 110–160`} />
+                  : <div className="card-h" style={{flex:1,padding:"18px 16px",borderRadius:18,textAlign:"center",
+                      background:"linear-gradient(135deg,#f9fafb,#f3f4f6)",border:"2px solid #e5e7eb"}}>
+                      <div style={{fontSize:26,marginBottom:6}}>❤️</div>
+                      <div style={{fontSize:9,fontWeight:700,letterSpacing:1.5,color:"#9ca3af",fontFamily:M,marginBottom:4}}>STATUS BPM</div>
+                      <div style={{fontSize:16,fontWeight:900,color:"#d1d5db"}}>—</div>
+                      <div style={{fontSize:10,color:"#d1d5db",marginTop:6,background:"rgba(0,0,0,.04)",
+                        borderRadius:50,padding:"2px 10px",fontFamily:M,display:"inline-block"}}>Tidak ada data</div>
+                    </div>
+                }
+                {toco !== null
+                  ? <StatCard label="STATUS TOCO" status={sTOCO(toco)}
+                      icon={isTOCONormal(toco)?"💙":toco<5?"⬜":"⚠️"}
+                      detail={`${toco} unit · Normal: 25–80`} />
+                  : <div className="card-h" style={{flex:1,padding:"18px 16px",borderRadius:18,textAlign:"center",
+                      background:"linear-gradient(135deg,#f9fafb,#f3f4f6)",border:"2px solid #e5e7eb"}}>
+                      <div style={{fontSize:26,marginBottom:6}}>🌊</div>
+                      <div style={{fontSize:9,fontWeight:700,letterSpacing:1.5,color:"#9ca3af",fontFamily:M,marginBottom:4}}>STATUS KONTRAKSI</div>
+                      <div style={{fontSize:16,fontWeight:900,color:"#d1d5db"}}>—</div>
+                      <div style={{fontSize:10,color:"#d1d5db",marginTop:6,background:"rgba(0,0,0,.04)",
+                        borderRadius:50,padding:"2px 10px",fontFamily:M,display:"inline-block"}}>Tidak ada data</div>
+                    </div>
+                }
+              </div>
+            </div>
+
+            {/* CTG Plotter */}
+            <div style={{
+              background:"#fff", borderRadius:24, padding:"22px",
+              border:"1px solid rgba(0,0,0,.06)", boxShadow:"0 4px 24px rgba(0,0,0,.06)",
+              marginBottom:20,
+            }}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+                <div>
+                  <div style={{fontWeight:800,color:"#1e293b",fontSize:15}}>📈 CTG Plotter — Real-time</div>
+                  <div style={{fontSize:11,color:"#94a3b8",marginTop:3,fontFamily:M}}>
+                    ❤️ FHR (merah) &nbsp;|&nbsp; 🔵 Kontraksi (biru) &nbsp;|&nbsp; 🔖 Bookmark (kuning)
+                  </div>
+                </div>
+
+                {/* Bookmark indicator */}
+                <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+                  <div style={{
+                    width:64, height:64, borderRadius:"50%",
+                    background: lastBm ? "linear-gradient(135deg,#fde68a,#fbbf24)" : "linear-gradient(135deg,#f9fafb,#f3f4f6)",
+                    border:`2px dashed ${lastBm ? "#f59e0b" : "#e5e7eb"}`,
+                    display:"flex", alignItems:"center", justifyContent:"center",
+                    fontSize:26, transition:"all .4s",
+                    boxShadow: lastBm ? "0 0 0 5px rgba(251,191,36,.25)" : "none",
+                  }}>🔖</div>
+                  <span style={{fontSize:9,fontWeight:800,color:"#d97706",fontFamily:M,letterSpacing:1}}>BOOKMARK</span>
+                  <span style={{fontSize:9,color:"#92400e",fontFamily:M}}>
+                    {lastBm ? `✓ ${lastBm}` : "belum ada"}
+                  </span>
+                </div>
+              </div>
+
+              <div style={{height:300}}>
+                <CTGCanvas ref={ctgRef} bH={bpmH} tH={tocoH} bmIdxs={bmIdxs} h={300} />
+              </div>
+
+              {/* ── Legend / Keterangan Waktu Grafik ── */}
+              <div style={{
+                marginTop:10,
+                background:"linear-gradient(135deg,#fafaf9,#f5f5f0)",
+                border:"1px solid rgba(180,120,60,0.18)",
+                borderRadius:14,
+                padding:"12px 16px",
+              }}>
+                {/* Judul legend */}
+                <div style={{
+                  fontSize:10, fontWeight:800, color:"#78350f", fontFamily:M,
+                  letterSpacing:1.2, marginBottom:10, display:"flex", alignItems:"center", gap:6,
+                }}>
+                  <span style={{fontSize:13}}>🕐</span> KETERANGAN SKALA WAKTU (SUMBU X)
+                </div>
+
+                <div style={{display:"flex", flexWrap:"wrap", gap:8, alignItems:"stretch"}}>
+
+                  {/* Arah waktu */}
+                  <div style={{
+                    flex:"1 1 180px", background:"#fff7ed", border:"1px solid #fed7aa",
+                    borderRadius:10, padding:"9px 12px", display:"flex", alignItems:"center", gap:10,
+                  }}>
+                    <div style={{fontSize:20, flexShrink:0}}>⬅️</div>
+                    <div>
+                      <div style={{fontSize:9, fontWeight:800, color:"#c2410c", fontFamily:M, letterSpacing:1}}>ARAH WAKTU</div>
+                      <div style={{fontSize:12, fontWeight:700, color:"#431407"}}>Kiri = masa lalu</div>
+                      <div style={{fontSize:10, color:"#92400e"}}>Kanan (<span style={{fontWeight:800}}>Skrg</span>) = saat ini</div>
+                    </div>
+                  </div>
+
+                  {/* Kotak kecil = 10 detik */}
+                  <div style={{
+                    flex:"1 1 180px", background:"#fefce8", border:"1px solid #fde047",
+                    borderRadius:10, padding:"9px 12px", display:"flex", alignItems:"center", gap:10,
+                  }}>
+                    <div style={{
+                      width:26, height:26, border:"2px solid rgba(180,100,60,0.45)",
+                      borderRadius:4, flexShrink:0, background:"rgba(253,240,232,0.8)",
+                      display:"flex", alignItems:"center", justifyContent:"center",
+                    }}>
+                      <div style={{width:8, height:8, background:"rgba(180,100,60,0.35)", borderRadius:1}} />
+                    </div>
+                    <div>
+                      <div style={{fontSize:9, fontWeight:800, color:"#854d0e", fontFamily:M, letterSpacing:1}}>KOTAK KECIL</div>
+                      <div style={{fontSize:12, fontWeight:700, color:"#431407"}}>= 10 detik</div>
+                      <div style={{fontSize:10, color:"#92400e"}}>Garis tipis coklat</div>
+                    </div>
+                  </div>
+
+                  {/* Kotak besar = 1 menit */}
+                  <div style={{
+                    flex:"1 1 180px", background:"#fff7ed", border:"1px solid #fdba74",
+                    borderRadius:10, padding:"9px 12px", display:"flex", alignItems:"center", gap:10,
+                  }}>
+                    <div style={{
+                      width:26, height:26, border:"2.5px solid rgba(140,60,20,0.7)",
+                      borderRadius:4, flexShrink:0, background:"rgba(253,240,232,0.8)",
+                    }} />
+                    <div>
+                      <div style={{fontSize:9, fontWeight:800, color:"#c2410c", fontFamily:M, letterSpacing:1}}>KOTAK BESAR</div>
+                      <div style={{fontSize:12, fontWeight:700, color:"#431407"}}>= 1 menit</div>
+                      <div style={{fontSize:10, color:"#92400e"}}>Garis tegas coklat tua</div>
+                    </div>
+                  </div>
+
+                  {/* Label sumbu X */}
+                  <div style={{
+                    flex:"1 1 180px", background:"#f0f9ff", border:"1px solid #bae6fd",
+                    borderRadius:10, padding:"9px 12px", display:"flex", alignItems:"center", gap:10,
+                  }}>
+                    <div style={{fontSize:20, flexShrink:0}}>🔢</div>
+                    <div>
+                      <div style={{fontSize:9, fontWeight:800, color:"#0369a1", fontFamily:M, letterSpacing:1}}>FORMAT LABEL</div>
+                      <div style={{fontSize:12, fontWeight:700, color:"#0c4a6e"}}>-<span style={{fontFamily:M}}>menit:detik</span></div>
+                      <div style={{fontSize:10, color:"#0369a1"}}>
+                        Contoh: <span style={{fontFamily:M, fontWeight:700}}>-2:00</span> = 2 menit lalu
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Kecepatan kertas */}
+                  <div style={{
+                    flex:"1 1 180px", background:"#f0fdf4", border:"1px solid #bbf7d0",
+                    borderRadius:10, padding:"9px 12px", display:"flex", alignItems:"center", gap:10,
+                  }}>
+                    <div style={{fontSize:20, flexShrink:0}}>📏</div>
+                    <div>
+                      <div style={{fontSize:9, fontWeight:800, color:"#15803d", fontFamily:M, letterSpacing:1}}>KECEPATAN KERTAS</div>
+                      <div style={{fontSize:12, fontWeight:700, color:"#14532d"}}>1 cm / menit</div>
+                      <div style={{fontSize:10, color:"#166534"}}>Standar NST internasional</div>
+                    </div>
+                  </div>
+
+                </div>
+
+                {/* Diagram mini ilustrasi sumbu X */}
+                <div style={{
+                  marginTop:10, background:"rgba(253,240,232,0.5)", borderRadius:8,
+                  padding:"8px 12px", display:"flex", alignItems:"center", gap:0,
+                  border:"1px solid rgba(180,100,60,0.15)", overflowX:"auto",
+                }}>
+                  {/* Label kiri */}
+                  <div style={{fontSize:9, color:"#78350f", fontFamily:M, fontWeight:700, flexShrink:0, marginRight:6}}>
+                    masa lalu ←
+                  </div>
+                  {/* Blok mini timeline */}
+                  {["-3:00","-2:30","-2:00","-1:30","-1:00","-0:30"].map((lbl, i) => (
+                    <div key={i} style={{display:"flex", flexDirection:"column", alignItems:"center", flex:"1 1 0", minWidth:44}}>
+                      <div style={{
+                        width:"100%", height:14,
+                        background: i % 2 === 0 ? "rgba(253,240,232,0.9)" : "rgba(255,248,240,0.7)",
+                        borderLeft:`${i===0?1:1}px solid rgba(140,60,20,${i===0?0.5:0.3})`,
+                        borderTop:"1px solid rgba(140,60,20,0.2)",
+                        borderBottom:"1px solid rgba(140,60,20,0.2)",
+                        position:"relative",
+                      }}>
+                        {/* Garis tengah 30 detik */}
+                        <div style={{
+                          position:"absolute", top:0, left:"50%",
+                          width:1, height:"100%",
+                          background:"rgba(140,60,20,0.25)",
+                        }} />
+                      </div>
+                      <div style={{
+                        fontSize:8, color:"#92400e", fontFamily:M, marginTop:2,
+                        fontWeight: lbl === "Skrg" ? 800 : 400,
+                      }}>{lbl}</div>
+                    </div>
+                  ))}
+                  {/* Blok "Skrg" */}
+                  <div style={{display:"flex", flexDirection:"column", alignItems:"center", flex:"1 1 0", minWidth:44}}>
+                    <div style={{
+                      width:"100%", height:14,
+                      background:"rgba(240,255,240,0.9)",
+                      borderLeft:"2px solid rgba(22,163,74,0.7)",
+                      borderRight:"1px solid rgba(22,163,74,0.4)",
+                      borderTop:"1px solid rgba(22,163,74,0.3)",
+                      borderBottom:"1px solid rgba(22,163,74,0.3)",
+                    }} />
+                    <div style={{fontSize:8, color:"#15803d", fontFamily:M, marginTop:2, fontWeight:800}}>Skrg</div>
+                  </div>
+                  {/* Label kanan */}
+                  <div style={{fontSize:9, color:"#15803d", fontFamily:M, fontWeight:700, flexShrink:0, marginLeft:6}}>
+                    → saat ini
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+            {/* ── Legend / Keterangan Sumbu Y ── */}
+            <div style={{
+              marginBottom:12,
+              background:"linear-gradient(135deg,#fafaf9,#f5f5f0)",
+              border:"1px solid rgba(180,120,60,0.18)",
+              borderRadius:14, padding:"12px 16px",
+            }}>
+              <div style={{
+                fontSize:10, fontWeight:800, color:"#78350f", fontFamily:M,
+                letterSpacing:1.2, marginBottom:10, display:"flex", alignItems:"center", gap:6,
+              }}>
+                <span style={{fontSize:13}}>📐</span> KETERANGAN SKALA NILAI (SUMBU Y)
+              </div>
+
+              <div style={{display:"flex", flexWrap:"wrap", gap:8}}>
+
+                {/* ── PANEL FHR / BPM ── */}
+                <div style={{
+                  flex:"1 1 280px",
+                  background:"#fff1f2", border:"1px solid #fecdd3",
+                  borderRadius:12, padding:"12px 14px",
+                }}>
+                  <div style={{
+                    fontSize:10, fontWeight:800, color:"#be123c", fontFamily:M,
+                    letterSpacing:1, marginBottom:8, display:"flex", alignItems:"center", gap:6,
+                  }}>
+                    <div style={{width:14,height:3,background:"#c0392b",borderRadius:2}} />
+                    ❤ SUMBU Y ATAS — FHR (Detak Jantung Janin)
+                  </div>
+                  {/* Mini bar FHR */}
+                  <div style={{display:"flex", gap:4, alignItems:"stretch", marginBottom:8}}>
+                    {/* Skala vertikal mini */}
+                    <div style={{display:"flex", flexDirection:"column", justifyContent:"space-between", alignItems:"flex-end", width:32}}>
+                      {[210,180,160,150,140,130,120,110,90,60,30].map(v => (
+                        <div key={v} style={{
+                          fontSize:7, fontFamily:M, color:
+                            v===160?"#16a34a": v===110?"#16a34a":
+                            v>160?"#dc2626": v<110?"#dc2626":"#92400e",
+                          fontWeight: (v===160||v===110) ? 800 : 400,
+                          lineHeight:1,
+                        }}>{v}</div>
+                      ))}
+                    </div>
+                    {/* Bar zona */}
+                    <div style={{flex:1, position:"relative", borderRadius:6, overflow:"hidden", minHeight:80}}>
+                      {/* Zona takikardia >160 */}
+                      <div style={{
+                        position:"absolute", top:"0%", left:0, right:0, height:"27%",
+                        background:"rgba(254,202,202,0.6)", borderBottom:"1px dashed #f87171",
+                        display:"flex", alignItems:"center", justifyContent:"center",
+                      }}>
+                        <span style={{fontSize:8,color:"#b91c1c",fontWeight:700}}>⬆ TAKIKARDIA (&gt;160 bpm)</span>
+                      </div>
+                      {/* Zona normal 110-160 */}
+                      <div style={{
+                        position:"absolute", top:"27%", left:0, right:0, height:"32%",
+                        background:"rgba(134,239,172,0.35)", border:"1px solid rgba(22,163,74,0.4)",
+                        display:"flex", alignItems:"center", justifyContent:"center",
+                      }}>
+                        <span style={{fontSize:8,color:"#15803d",fontWeight:800}}>✅ NORMAL (110–160 bpm)</span>
+                      </div>
+                      {/* Zona bradikardi <110 */}
+                      <div style={{
+                        position:"absolute", top:"59%", left:0, right:0, height:"41%",
+                        background:"rgba(254,202,202,0.4)", borderTop:"1px dashed #f87171",
+                        display:"flex", alignItems:"center", justifyContent:"center",
+                      }}>
+                        <span style={{fontSize:8,color:"#b91c1c",fontWeight:700}}>⬇ BRADIKARDI (&lt;110 bpm)</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{display:"flex", flexDirection:"column", gap:3}}>
+                    {[
+                      {dot:"#dc2626", label:"Takikardia", val:"> 160 bpm", note:"Segera evaluasi"},
+                      {dot:"#16a34a", label:"Normal",     val:"110 – 160 bpm", note:"Zona hijau pada grafik"},
+                      {dot:"#dc2626", label:"Bradikardi",  val:"< 110 bpm", note:"Segera evaluasi"},
+                    ].map((r,i) => (
+                      <div key={i} style={{display:"flex", alignItems:"center", gap:6, fontSize:10}}>
+                        <div style={{width:8,height:8,borderRadius:"50%",background:r.dot,flexShrink:0}} />
+                        <span style={{fontWeight:700,color:"#1e293b"}}>{r.label}</span>
+                        <span style={{fontFamily:M,color:"#64748b"}}>{r.val}</span>
+                        <span style={{color:"#94a3b8",fontSize:9}}>— {r.note}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* ── PANEL TOCO / Kontraksi ── */}
+                <div style={{
+                  flex:"1 1 280px",
+                  background:"#eff6ff", border:"1px solid #bfdbfe",
+                  borderRadius:12, padding:"12px 14px",
+                }}>
+                  <div style={{
+                    fontSize:10, fontWeight:800, color:"#1d4ed8", fontFamily:M,
+                    letterSpacing:1, marginBottom:8, display:"flex", alignItems:"center", gap:6,
+                  }}>
+                    <div style={{width:14,height:3,background:"#1a5276",borderRadius:2}} />
+                    🌊 SUMBU Y BAWAH — TOCO (Kontraksi Uterus)
+                  </div>
+                  {/* Mini bar TOCO */}
+                  <div style={{display:"flex", gap:4, alignItems:"stretch", marginBottom:8}}>
+                    <div style={{display:"flex", flexDirection:"column", justifyContent:"space-between", alignItems:"flex-end", width:32}}>
+                      {[100,80,60,40,20,0].map(v => (
+                        <div key={v} style={{
+                          fontSize:7, fontFamily:M,
+                          color: v>80?"#dc2626": v>=25?"#0369a1":"#64748b",
+                          fontWeight:(v===80||v===25)?800:400, lineHeight:1,
+                        }}>{v}</div>
+                      ))}
+                    </div>
+                    <div style={{flex:1, position:"relative", borderRadius:6, overflow:"hidden", minHeight:60}}>
+                      {/* Zona kontraksi kuat >80 */}
+                      <div style={{
+                        position:"absolute", top:"0%", left:0, right:0, height:"20%",
+                        background:"rgba(254,202,202,0.6)", borderBottom:"1px dashed #f87171",
+                        display:"flex", alignItems:"center", justifyContent:"center",
+                      }}>
+                        <span style={{fontSize:8,color:"#b91c1c",fontWeight:700}}>⬆ TERLALU KUAT (&gt;80 unit)</span>
+                      </div>
+                      {/* Zona normal 25-80 */}
+                      <div style={{
+                        position:"absolute", top:"20%", left:0, right:0, height:"55%",
+                        background:"rgba(147,197,253,0.35)", border:"1px solid rgba(59,130,246,0.4)",
+                        display:"flex", alignItems:"center", justifyContent:"center",
+                      }}>
+                        <span style={{fontSize:8,color:"#1d4ed8",fontWeight:800}}>✅ NORMAL (25–80 unit)</span>
+                      </div>
+                      {/* Zona lemah <25 */}
+                      <div style={{
+                        position:"absolute", top:"75%", left:0, right:0, height:"25%",
+                        background:"rgba(241,245,249,0.6)", borderTop:"1px dashed #94a3b8",
+                        display:"flex", alignItems:"center", justifyContent:"center",
+                      }}>
+                        <span style={{fontSize:8,color:"#64748b",fontWeight:600}}>Tidak ada / lemah (&lt;25)</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{display:"flex", flexDirection:"column", gap:3}}>
+                    {[
+                      {dot:"#dc2626", label:"Sangat kuat",  val:"> 80 unit",   note:"Tachysystole — evaluasi"},
+                      {dot:"#3b82f6", label:"Normal",       val:"25 – 80 unit", note:"Kontraksi aktif"},
+                      {dot:"#94a3b8", label:"Lemah/tidak ada", val:"< 25 unit", note:"Istirahat / antara kontraksi"},
+                    ].map((r,i) => (
+                      <div key={i} style={{display:"flex", alignItems:"center", gap:6, fontSize:10}}>
+                        <div style={{width:8,height:8,borderRadius:"50%",background:r.dot,flexShrink:0}} />
+                        <span style={{fontWeight:700,color:"#1e293b"}}>{r.label}</span>
+                        <span style={{fontFamily:M,color:"#64748b"}}>{r.val}</span>
+                        <span style={{color:"#94a3b8",fontSize:9}}>— {r.note}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+            {/* Reference strip + Export buttons */}
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"stretch"}}>
+              {[
+                {e:"❤️",l:"BPM Normal",         v:"110 – 160 bpm",   bg:"#fff1f2",bc:"#fecdd3",tc:"#f43f5e"},
+                {e:"🌊",l:"Kontraksi Normal",         v:"25 - 80 unit",       bg:"#f0f9ff",bc:"#bae6fd",tc:"#0ea5e9"},
+                {e:"🔖",l:"Bookmark", v:"Tandai kontraksi", bg:"#fffbeb",bc:"#fde68a",tc:"#d97706"},
+                {e:"⚡",l:"Akselerasi",           v:">= 2x / 20 mnt",  bg:"#f0fdf4",bc:"#bbf7d0",tc:"#16a34a"},
+              ].map(r => (
+                <div key={r.l} style={{
+                  flex:"1 1 160px", background:r.bg, border:`1px solid ${r.bc}`,
+                  borderRadius:14, padding:"12px 16px",
+                  display:"flex", alignItems:"center", gap:10,
+                }}>
+                  <span style={{fontSize:18}}>{r.e}</span>
+                  <div>
+                    <div style={{fontSize:9,color:r.tc,fontWeight:700,fontFamily:M,letterSpacing:1}}>{r.l}</div>
+                    <div style={{fontSize:12,fontWeight:800,color:"#334155"}}>{r.v}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Tombol Simpan Laporan — hanya muncul setelah recording selesai (stop) */}
+            {hasRecordingEnded && bpmFull.length > 0 && (
+              <div style={{
+                marginTop:14,
+                background:"linear-gradient(135deg,rgba(255,255,255,.95),rgba(248,244,239,.95))",
+                border:"1px solid rgba(0,0,0,.06)", borderRadius:18, padding:"16px 20px",
+                display:"flex", alignItems:"center", justifyContent:"space-between", gap:12,
+                boxShadow:"0 2px 12px rgba(0,0,0,.05)",
+              }}>
+                <div>
+                  <div style={{fontSize:13,fontWeight:800,color:"#1e293b"}}>
+                    Simpan Laporan Pemeriksaan
+                  </div>
+                  <div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>
+                    {selectedPatient ? `Pasien: ${selectedPatient.nama}` : "Pilih pasien untuk laporan lengkap"}
+                    {" · "}{new Date().toLocaleDateString("id-ID",{day:"2-digit",month:"short",year:"numeric"})}
+                    {" · "}{bpmFull.length} titik data
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:10,flexShrink:0}}>
+                  {/* Tombol Reset — bersihkan grafik tanpa hapus riwayat */}
+                  <button onClick={() => {
+                    setBpmH([]); setTocoH([]); setBmIdxs([]);
+                    setBpmFull([]); setTocoFull([]); setBmIdxsFull([]);
+                    setBpm(null); setToco(null); setLastBm(null);
+                    setHasRecordingEnded(false);
+                    lastBpmValRef.current  = null;
+                    lastTocoValRef.current = null;
+                  }} style={{
+                    padding:"10px 18px", border:"1px solid #e2e8f0", borderRadius:12,
+                    cursor:"pointer", background:"#f8fafc", color:"#64748b",
+                    fontFamily:F, fontSize:12, fontWeight:700,
+                  }}>
+                    🗑 Bersihkan Grafik
+                  </button>
+                  <button onClick={exportPDF} style={{
+                    padding:"10px 24px", border:"none", borderRadius:12, cursor:"pointer",
+                    background:"linear-gradient(135deg,#f43f5e,#e11d48)",
+                    color:"#fff", fontFamily:F, fontSize:13, fontWeight:800,
+                    boxShadow:"0 4px 14px rgba(244,63,94,.35)",
+                    display:"flex", alignItems:"center", gap:8,
+                  }}>
+                    <span style={{fontSize:17}}>📄</span> Simpan Laporan PDF
+                  </button>
+                </div>
+              </div>
+            )}
+
+          </div>
+        )}
+
+        {/* ══ RIWAYAT ══ */}
+        {tab === "history" && (
+          <div style={{animation:"fadeSlideIn .35s ease"}}>
+            <div style={{marginBottom:20}}>
+              <h2 style={{fontSize:20,fontWeight:900,color:"#1e293b"}}>📋 Riwayat Pengukuran</h2>
+              <p style={{fontSize:13,color:"#94a3b8",marginTop:4}}>
+                {histLoading ? "Memuat…" : `${histList.length} sesi tersimpan`}
+              </p>
+            </div>
+
+            {histLoading && (
+              <div style={{textAlign:"center",padding:40}}>
+                <div style={{width:36,height:36,margin:"0 auto",border:"4px solid #fecdd3",borderTopColor:"#f43f5e",borderRadius:"50%",animation:"spin .8s linear infinite"}} />
+              </div>
+            )}
+
+            {!histLoading && histList.length === 0 && (
+              <div style={{textAlign:"center",padding:60,color:"#94a3b8",fontSize:14}}>
+                Belum ada data. Mulai pengukuran dengan alat NST.
+              </div>
+            )}
+
+            {!histLoading && histList.map(rec => {
+              const recKey = rec.session_id ? String(rec.session_id) : rec.tanggal;
+              return (
+              <div key={recKey} style={{marginBottom:14}}>
+                <div className="hist-row" onClick={() => loadHistGraph(rec.tanggal, rec.session_id)} style={{
+                  background: selectedDate===recKey ? "#fff" : "rgba(255,255,255,.82)",
+                  border:`2px solid ${selectedDate===recKey ? "#fda4af" : "rgba(0,0,0,.06)"}`,
+                  borderRadius: selectedDate===recKey ? "18px 18px 0 0" : "18px",
+                  padding:"18px 22px",
+                }}>
+                  <div style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
+                    <div style={{
+                      width:42, height:42, borderRadius:12, flexShrink:0,
+                      background:`linear-gradient(135deg,${rec.status_bpm==="Normal"&&rec.status_toco==="Normal"?"#d1fae5,#a7f3d0":"#dbeafe,#bfdbfe"})`,
+                      display:"flex", alignItems:"center", justifyContent:"center", fontSize:20,
+                    }}>
+                      {rec.status_bpm==="Normal"&&rec.status_toco==="Normal" ? "✅" : "📋"}
+                    </div>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:800,color:"#1e293b",fontSize:15,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                        📅 {fmtDate(rec.tanggal + " 00:00:00")} — {rec.jam}
+                        {rec.jam_selesai && rec.jam_selesai !== rec.jam &&
+                          <span style={{fontSize:12,color:"#94a3b8"}}>s/d {rec.jam_selesai}</span>}
+                        {rec.session_id > 0 &&
+                          <span style={{fontSize:9,fontWeight:700,fontFamily:M,color:"#fff",
+                            background:"#6366f1",borderRadius:50,padding:"2px 8px"}}>
+                            SESI #{rec.session_id}
+                          </span>}
+                      </div>
+                      <div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>
+                        ⏱ {rec.durasi} &nbsp;·&nbsp; 🔖 {rec.bm_count} bookmark
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                      {[
+                        {l:"BPM",  v:rec.avg_bpm,           ok:rec.status_bpm==="Normal"},
+                        {l:"TOCO", v:`${rec.avg_toco} unit`, ok:rec.status_toco==="Normal"},
+                      ].map(s => (
+                        <div key={s.l} style={{
+                          padding:"5px 12px", borderRadius:50,
+                          background:s.ok?"rgba(134,239,172,.18)":"rgba(253,186,116,.18)",
+                          border:`1px solid ${s.ok?"#86efac":"#fdba74"}`,
+                        }}>
+                          <span style={{fontSize:10,color:"#94a3b8",fontFamily:M}}>{s.l} </span>
+                          <span style={{fontSize:13,fontWeight:800,color:s.ok?"#16a34a":"#ea580c"}}>{s.v}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <span style={{color:"#cbd5e1",fontSize:16}}>{selectedDate===recKey?"▲":"▼"}</span>
+                    {/* Tombol Hapus Riwayat */}
+                    <button
+                      onClick={e => {
+                        e.stopPropagation(); // jangan trigger loadHistGraph
+                        if (!window.confirm(`Hapus riwayat Sesi #${rec.session_id}?\nData yang sudah dihapus tidak bisa dikembalikan.`)) return;
+                        fetch(API_ACTIVE.replace("active_patient.php","delete_history.php"), {
+                          method:"POST",
+                          headers:{"Content-Type":"application/json"},
+                          body: JSON.stringify({session_id: rec.session_id, patient_id: selectedPatient?.id||0})
+                        })
+                        .then(r=>r.json())
+                        .then(d=>{
+                          if (d.status==="ok") {
+                            setHistList(prev => prev.filter(r => r.session_id !== rec.session_id));
+                            if (selectedDate === recKey) { setSelectedDate(null); setHistGraphData(null); setHistGraphError(""); }
+                          } else {
+                            alert("Gagal menghapus: " + (d.error||"unknown error"));
+                          }
+                        })
+                        .catch(()=>alert("Gagal menghapus riwayat."));
+                      }}
+                      style={{
+                        padding:"5px 10px", border:"1px solid #fca5a5", borderRadius:8,
+                        background:"#fff1f2", color:"#ef4444", cursor:"pointer",
+                        fontSize:11, fontWeight:700, flexShrink:0,
+                        transition:"all .15s",
+                      }}
+                      title="Hapus riwayat ini"
+                    >🚮</button>
+                  </div>
+                </div>
+
+                {selectedDate === recKey && (
+                  <div style={{
+                    background:"#fff", borderRadius:"0 0 18px 18px",
+                    border:"2px solid #fda4af", borderTop:"none",
+                    padding:"20px", animation:"fadeSlideIn .3s ease",
+                  }}>
+                    {histGraphLoading && (
+                      <div style={{textAlign:"center",padding:30}}>
+                        <div style={{width:30,height:30,margin:"0 auto",border:"3px solid #fecdd3",borderTopColor:"#f43f5e",borderRadius:"50%",animation:"spin .8s linear infinite"}} />
+                        <p style={{marginTop:10,color:"#94a3b8",fontSize:12}}>Memuat grafik…</p>
+                      </div>
+                    )}
+                    {!histGraphLoading && histGraphData && (
+                      <HistGraph data={histGraphData} dateLabel={rec.tanggal} sessionRec={rec} pasien={selectedPatient} lastPdfBlob={lastPdfBlob} lastPdfName={lastPdfName} />
+                    )}
+                    {!histGraphLoading && !histGraphData && (
+                      <div style={{textAlign:"center",padding:24}}>
+                        <p style={{color:"#94a3b8",fontSize:13,fontWeight:600}}>Gagal memuat data grafik</p>
+                        {histGraphError && (
+                          <p style={{
+                            marginTop:8, color:"#ef4444", fontSize:11, fontFamily:M,
+                            background:"#fef2f2", border:"1px solid #fecaca",
+                            borderRadius:8, padding:"8px 12px", display:"inline-block",
+                            maxWidth:"90%", wordBreak:"break-word",
+                          }}>
+                            {histGraphError}
+                          </p>
+                        )}
+                        <button
+                          onClick={() => fetchHistGraph(rec.tanggal, rec.session_id)}
+                          style={{
+                            display:"block", margin:"12px auto 0",
+                            padding:"6px 16px", borderRadius:50,
+                            border:"1px solid #fda4af", background:"#fff1f2",
+                            color:"#e11d48", cursor:"pointer", fontWeight:700, fontSize:11,
+                          }}
+                        >
+                          🔄 Coba lagi
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );})
+          }
+          </div>
+        )}
+
+        {/* ══ PASIEN ══ */}
+        {tab === "pasien" && (
+          <div style={{maxWidth:820, animation:"fadeSlideIn .35s ease"}}>
+
+            {/* ── Kartu pasien aktif ── */}
+            {selectedPatient && (
+              <div style={{
+                background:"linear-gradient(135deg,#fff1f2,#ffe4e6)",
+                border:"2px solid #fecdd3", borderRadius:22, padding:"20px 24px",
+                marginBottom:22, display:"flex", alignItems:"center", gap:18,
+                boxShadow:"0 6px 24px rgba(253,164,175,.2)",
+              }}>
+                <div style={{
+                  width:56, height:56, borderRadius:"50%", flexShrink:0,
+                  background:"linear-gradient(135deg,#fecdd3,#fda4af)",
+                  display:"flex", alignItems:"center", justifyContent:"center",
+                  fontSize:26, boxShadow:"0 4px 14px rgba(253,164,175,.45)",
+                }}>👩</div>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:11,fontWeight:700,color:"#fda4af",letterSpacing:1.5,fontFamily:M,marginBottom:3}}>
+                    PASIEN AKTIF SEKARANG
+                  </div>
+                  <div style={{fontSize:18,fontWeight:900,color:"#f43f5e",letterSpacing:-.3}}>
+                    {selectedPatient.nama}
+                  </div>
+                  <div style={{display:"flex",gap:14,marginTop:5,flexWrap:"wrap"}}>
+                    {selectedPatient.no_rekam_medis &&
+                      <span style={{fontSize:11,color:"#94a3b8"}}>📋 {selectedPatient.no_rekam_medis}</span>}
+                    {selectedPatient.tanggal_lahir &&
+                      <span style={{fontSize:11,color:"#94a3b8"}}>🎂 {hitungUsia(selectedPatient.tanggal_lahir)}</span>}
+                    {selectedPatient.usia_kehamilan &&
+                      <span style={{fontSize:11,color:"#94a3b8"}}>🤰 {selectedPatient.usia_kehamilan} minggu</span>}
+                    {selectedPatient.no_telp &&
+                      <span style={{fontSize:11,color:"#94a3b8"}}>📱 {selectedPatient.no_telp}</span>}
+                    {selectedPatient.nama_suami &&
+                      <span style={{fontSize:11,color:"#94a3b8"}}>👨 {selectedPatient.nama_suami}</span>}
+                  </div>
+                  {selectedPatient.catatan &&
+                    <div style={{fontSize:11,color:"#f87171",marginTop:4,fontStyle:"italic"}}>
+                      📝 {selectedPatient.catatan}
+                    </div>
+                  }
+                </div>
+                <button onClick={()=>setTab("monitor")} style={{
+                  padding:"10px 20px", background:"linear-gradient(135deg,#fb7185,#f43f5e)",
+                  border:"none", borderRadius:12, color:"#fff",
+                  fontFamily:F, fontSize:12, fontWeight:800, cursor:"pointer",
+                  boxShadow:"0 4px 14px rgba(244,63,94,.35)", flexShrink:0,
+                }}>💗 Monitor Pasien Ini</button>
+              </div>
+            )}
+
+            {/* ── Header + tombol tambah ── */}
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+              <div>
+                <h2 style={{fontSize:18,fontWeight:900,color:"#1e293b"}}>👥 Daftar Pasien</h2>
+                <p style={{fontSize:12,color:"#94a3b8",marginTop:2}}>
+                  {patientLoading ? "Memuat…" : `${patientList.length} pasien terdaftar`}
+                </p>
+              </div>
+              <button onClick={()=>{setShowAddForm(f=>!f);setPasienErr("");}} style={{
+                padding:"10px 20px", background:"linear-gradient(135deg,#fb7185,#f43f5e)",
+                border:"none", borderRadius:12, color:"#fff",
+                fontFamily:F, fontSize:12, fontWeight:800, cursor:"pointer",
+                boxShadow:"0 4px 14px rgba(244,63,94,.3)",
+              }}>+ Pasien Baru</button>
+            </div>
+
+            {/* ── Form Tambah Pasien ── */}
+            {showAddForm && (
+              <div style={{
+                background:"#fff", borderRadius:20, padding:"22px 24px",
+                border:"2px solid #fda4af", marginBottom:20,
+                animation:"fadeSlideIn .3s ease",
+                boxShadow:"0 8px 28px rgba(253,164,175,.18)",
+              }}>
+                <h3 style={{fontSize:15,fontWeight:800,color:"#1e293b",marginBottom:18}}>✏️ Data Pasien Baru</h3>
+
+                {[
+                  [
+                    {k:"nama",          l:"NAMA LENGKAP",           ph:"Nama lengkap pasien", req:true,  t:"text",   w:2},
+                    {k:"tanggal_lahir", l:"TANGGAL LAHIR",           ph:"",                   req:true,  t:"date",   w:1},
+                  ],[
+                    {k:"no_rekam_medis",l:"NO. REKAM MEDIS",         ph:"RM-001",              req:true,  t:"text",   w:1},
+                    {k:"usia_kehamilan",l:"USIA KEHAMILAN (minggu)", ph:"32",                  req:true,  t:"number", w:1},
+                  ],[
+                    {k:"nama_suami",    l:"NAMA SUAMI / WALI",       ph:"Opsional",            req:false, t:"text",   w:1},
+                    {k:"no_telp",       l:"NO. TELEPON",              ph:"Opsional",            req:false, t:"text",   w:1},
+                  ]
+                ].map((row, ri) => (
+                  <div key={ri} style={{display:"flex",gap:12,marginBottom:12}}>
+                    {row.map(f => (
+                      <div key={f.k} style={{flex:f.w}}>
+                        <label style={{display:"block",fontSize:10,fontWeight:700,
+                          color:"#64748b",marginBottom:5,letterSpacing:.8}}>
+                          {f.l}{f.req && <span style={{color:"#f43f5e"}}> *</span>}
+                        </label>
+                        <input
+                          type={f.t} placeholder={f.ph}
+                          value={newPasien[f.k]}
+                          min={f.t==="number"?1:undefined}
+                          max={f.t==="number"?45:undefined}
+                          onChange={e=>setNewPasien(p=>({...p,[f.k]:e.target.value}))}
+                          style={{width:"100%",padding:"10px 13px",background:"#f8fafc",
+                            border:"2px solid #e2e8f0",borderRadius:10,fontSize:13,
+                            fontFamily:F,outline:"none",color:"#1e293b"}}
+                          onFocus={e=>e.target.style.borderColor="#fda4af"}
+                          onBlur={e=>e.target.style.borderColor="#e2e8f0"}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                ))}
+
+                <div style={{marginBottom:14}}>
+                  <label style={{display:"block",fontSize:10,fontWeight:700,
+                    color:"#64748b",marginBottom:5,letterSpacing:.8}}>CATATAN TAMBAHAN</label>
+                  <textarea placeholder="Riwayat, kondisi khusus, dll. (opsional)"
+                    value={newPasien.catatan} rows={2}
+                    onChange={e=>setNewPasien(p=>({...p,catatan:e.target.value}))}
+                    style={{width:"100%",padding:"10px 13px",background:"#f8fafc",
+                      border:"2px solid #e2e8f0",borderRadius:10,fontSize:13,
+                      fontFamily:F,outline:"none",color:"#1e293b",resize:"vertical",lineHeight:1.6}}
+                    onFocus={e=>e.target.style.borderColor="#fda4af"}
+                    onBlur={e=>e.target.style.borderColor="#e2e8f0"}
+                  />
+                </div>
+
+                {pasienErr && (
+                  <div style={{background:"#fff1f2",border:"1px solid #fecdd3",borderRadius:10,
+                    padding:"10px 14px",marginBottom:12,fontSize:12,color:"#b91c1c",fontWeight:700}}>
+                    ⚠️ {pasienErr}
+                  </div>
+                )}
+
+                <div style={{display:"flex",gap:10}}>
+                  <button onClick={saveNewPasien} disabled={savingPasien} style={{
+                    padding:"11px 24px",
+                    background: savingPasien ? "#fda4af" : "linear-gradient(135deg,#fb7185,#f43f5e)",
+                    border:"none",borderRadius:10,color:"#fff",fontFamily:F,
+                    fontSize:13,fontWeight:800,cursor: savingPasien ? "not-allowed" : "pointer",
+                    opacity: savingPasien ? 0.7 : 1,
+                    boxShadow:"0 4px 14px rgba(244,63,94,.3)",
+                  }}>
+                    {savingPasien ? "⏳ Menyimpan…" : "💾 Simpan Pasien"}
+                  </button>
+                  <button onClick={()=>{setShowAddForm(false);setPasienErr("");}} style={{
+                    padding:"11px 18px",background:"#f1f5f9",border:"none",
+                    borderRadius:10,color:"#64748b",fontFamily:F,
+                    fontSize:13,fontWeight:700,cursor:"pointer",
+                  }}>Batal</button>
+                </div>
+              </div>
+            )}
+
+            {/* ── Cari ── */}
+            <div style={{position:"relative",marginBottom:14}}>
+              <span style={{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)",fontSize:15}}>🔍</span>
+              <input
+                placeholder="Cari nama atau no. rekam medis..."
+                value={patientSearch}
+                onChange={e=>setPatientSearch(e.target.value)}
+                style={{width:"100%",padding:"11px 14px 11px 40px",background:"rgba(255,255,255,.9)",
+                  border:"2px solid #e2e8f0",borderRadius:14,fontSize:13,
+                  fontFamily:F,outline:"none",color:"#1e293b"}}
+                onFocus={e=>e.target.style.borderColor="#fda4af"}
+                onBlur={e=>e.target.style.borderColor="#e2e8f0"}
+              />
+            </div>
+
+            {/* ── Daftar ── */}
+            {patientLoading ? (
+              <div style={{textAlign:"center",padding:40}}>
+                <div style={{width:34,height:34,margin:"0 auto",border:"4px solid #fecdd3",
+                  borderTopColor:"#f43f5e",borderRadius:"50%",animation:"spin .8s linear infinite"}}/>
+                <p style={{marginTop:10,color:"#94a3b8",fontSize:13}}>Memuat…</p>
+              </div>
+            ) : (
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {patientList
+                  .filter(p =>
+                    p.nama.toLowerCase().includes(patientSearch.toLowerCase()) ||
+                    (p.no_rekam_medis||"").toLowerCase().includes(patientSearch.toLowerCase())
+                  )
+                  .map(p => {
+                    const isActive = selectedPatient?.id === p.id;
+                    return (
+                      <div key={p.id} className="card-h" style={{
+                        background: isActive ? "linear-gradient(135deg,#fff1f2,#ffe4e6)" : "rgba(255,255,255,.88)",
+                        border:`2px solid ${isActive ? "#fda4af" : "rgba(0,0,0,.06)"}`,
+                        borderRadius:16,padding:"15px 18px",
+                        display:"flex",alignItems:"center",gap:14,
+                        boxShadow: isActive ? "0 4px 18px rgba(253,164,175,.25)" : "0 2px 10px rgba(0,0,0,.04)",
+                      }}>
+                        {/* Avatar */}
+                        <div style={{
+                          width:46,height:46,borderRadius:"50%",flexShrink:0,
+                          background: isActive
+                            ? "linear-gradient(135deg,#fecdd3,#fda4af)"
+                            : "linear-gradient(135deg,#f1f5f9,#e2e8f0)",
+                          display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,
+                        }}>{isActive ? "👩" : "👤"}</div>
+
+                        {/* Info */}
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                            <span style={{fontSize:14,fontWeight:800,
+                              color: isActive ? "#f43f5e" : "#1e293b"}}>{p.nama}</span>
+                            {isActive && (
+                              <span style={{fontSize:9,fontWeight:700,color:"#fff",
+                                background:"#f43f5e",borderRadius:50,padding:"2px 8px",fontFamily:M}}>
+                                AKTIF
+                              </span>
+                            )}
+                          </div>
+                          <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+                            {p.no_rekam_medis && <span style={{fontSize:10,color:"#94a3b8"}}>📋 {p.no_rekam_medis}</span>}
+                            <span style={{fontSize:10,color:"#94a3b8"}}>🎂 {hitungUsia(p.tanggal_lahir)}</span>
+                            {p.usia_kehamilan && <span style={{fontSize:10,color:"#94a3b8"}}>🤰 {p.usia_kehamilan} minggu</span>}
+                            {p.no_telp && <span style={{fontSize:10,color:"#94a3b8"}}>📱 {p.no_telp}</span>}
+                          </div>
+                        </div>
+
+                        {/* Badge & tombol */}
+                        <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+                          {p.jumlah_sesi > 0 && (
+                            <div style={{textAlign:"center",padding:"4px 12px",
+                              background:"rgba(134,239,172,.15)",border:"1px solid #86efac",borderRadius:50}}>
+                              <div style={{fontSize:13,fontWeight:900,color:"#16a34a"}}>{p.jumlah_sesi}×</div>
+                              <div style={{fontSize:8,color:"#4ade80",fontFamily:M}}>periksa</div>
+                            </div>
+                          )}
+                          {isActive ? (
+                            <button onClick={()=>setTab("monitor")} style={{
+                              padding:"8px 16px",background:"linear-gradient(135deg,#fb7185,#f43f5e)",
+                              border:"none",borderRadius:10,color:"#fff",
+                              fontFamily:F,fontSize:11,fontWeight:800,cursor:"pointer",
+                              boxShadow:"0 3px 10px rgba(244,63,94,.3)",
+                            }}>💗 Monitor</button>
+                          ) : (
+                            <button onClick={()=>{pilihPasien(p);setTab("monitor");}} style={{
+                              padding:"8px 16px",background:"#f1f5f9",
+                              border:"1px solid #e2e8f0",borderRadius:10,color:"#475569",
+                              fontFamily:F,fontSize:11,fontWeight:700,cursor:"pointer",
+                            }}>Pilih →</button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                }
+                {patientList.filter(p =>
+                  p.nama.toLowerCase().includes(patientSearch.toLowerCase()) ||
+                  (p.no_rekam_medis||"").toLowerCase().includes(patientSearch.toLowerCase())
+                ).length === 0 && (
+                  <div style={{textAlign:"center",padding:"40px 0",color:"#94a3b8"}}>
+                    <div style={{fontSize:36,marginBottom:10}}>🔍</div>
+                    <div style={{fontSize:13,fontWeight:700}}>
+                      {patientSearch ? "Pasien tidak ditemukan" : "Belum ada pasien terdaftar"}
+                    </div>
+                    <div style={{fontSize:11,marginTop:5}}>
+                      {patientSearch ? "Coba kata kunci lain" : "Klik + Pasien Baru di atas"}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ══ PANDUAN ══ */}
+        {tab === "info" && (
+          <div style={{maxWidth:700, animation:"fadeSlideIn .35s ease"}}>
+            <h2 style={{fontSize:20,fontWeight:900,color:"#1e293b",marginBottom:20}}>📖 Panduan Penggunaan</h2>
+            {[
+              {e:"🔌",bg:"#fffbeb",bc:"#fde68a",t:"Koneksi Alat ke Website",
+               d:"Dua ESP32 mengirim data FHR dan TOCO secara terpisah setiap 500ms melalui WiFi. Website otomatis menggabungkan dan menampilkan data begitu alat terhubung. Indikator ❤ FHR dan 🌊 TOCO di header menunjukkan status masing-masing sensor."},
+              {e:"📊",bg:"#f0f9ff",bc:"#bae6fd",t:"Membaca Parameter",
+               d:"BPM (Fetal Heart Rate): nilai normal 110–160 bpm. TOCO (Kontraksi Uterus): nilai normal <50 unit. Status BPM dan TOCO ditampilkan terpisah sehingga lebih mudah dibaca."},
+              {e:"⏺",bg:"#fef2f2",bc:"#fecaca",t:"Tombol Start / Stop / Reset",
+               d:"START: mulai merekam sesi ke database — indikator ● REC muncul merah berkedip di header beserta durasi rekaman. STOP: hentikan rekaman, data tersimpan di Riwayat. RESET: hentikan rekaman tanpa menghapus data (untuk ganti pasien atau mulai sesi baru)."},
+              {e:"🔖",bg:"#fff7ed",bc:"#fed7aa",t:"Bookmark Kontraksi",
+               d:"Tombol bookmark ada di alat fisik. Ketika pasien merasakan kontraksi, tekan tombol di alat. Website akan otomatis menampilkan titik kuning (▲) pada grafik CTG di posisi waktu tersebut."},
+              {e:"🚨",bg:"#fff1f2",bc:"#fecdd3",t:"Sistem Alarm Otomatis",
+               d:"Banner merah berkedip otomatis muncul jika BPM <110 atau >160 bpm, atau TOCO >50 unit. Segera periksa kondisi pasien dan hubungi dokter yang bertugas."},
+              {e:"💾",bg:"#f0fdf4",bc:"#bbf7d0",t:"Menyimpan Grafik Riwayat",
+               d:"Setiap sesi tersimpan otomatis. Buka tab Riwayat, klik tanggal sesi untuk melihat grafik CTG lengkap, lalu tekan Simpan Grafik untuk mengunduh dalam format PNG."},
+            ].map((item,i) => (
+              <div key={i} style={{
+                display:"flex", gap:16, marginBottom:14,
+                background:item.bg, border:`1px solid ${item.bc}`, borderRadius:18, padding:"18px 20px",
+              }}>
+                <div style={{fontSize:26,flexShrink:0,marginTop:2}}>{item.e}</div>
+                <div>
+                  <div style={{fontSize:14,fontWeight:800,color:"#1e293b",marginBottom:5}}>{item.t}</div>
+                  <div style={{fontSize:13,color:"#475569",lineHeight:1.75}}>{item.d}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+// Mount React
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<ErrorBoundary><App /></ErrorBoundary>);
+</script>
+</body>
+</html>

@@ -1,13 +1,4 @@
 <?php
-// ================================================================
-//  history_data.php — Revisi 3: FULL DATA (tanpa downsample)
-//
-//  GET ?session_id=5        → data grafik sesi tertentu (recommended)
-//  GET ?date=2025-03-01     → data grafik by tanggal (backward-compat)
-//
-//  Mengembalikan SEMUA titik mentah tanpa downsample, agar grafik
-//  & PDF dari halaman Riwayat 100% identik dengan dari Monitor Live.
-// ================================================================
 
 header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json");
@@ -19,7 +10,6 @@ $session_id = isset($_GET['session_id']) ? intval($_GET['session_id']) : 0;
 $date       = $_GET['date'] ?? '';
 
 if ($session_id > 0) {
-    // Query by session_id (lebih akurat) — intval sudah aman dari injection
     $result = $conn->query("
         SELECT bpm, toco, bookmark
         FROM nst_realtime
@@ -27,7 +17,6 @@ if ($session_id > 0) {
         ORDER BY id ASC
     ");
 } elseif (preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
-    // Backward-compat: query by tanggal
     $date_safe = $conn->real_escape_string($date);
     $result = $conn->query("
         SELECT bpm, toco, bookmark
@@ -61,7 +50,6 @@ while ($row = $result->fetch_assoc()) {
 
 $total = count($bpm_data);
 
-// ── Tidak ada downsample — kirim semua titik apa adanya ──
 echo json_encode([
     "bpm_data"    => $bpm_data,
     "toco_data"   => $toco_data,

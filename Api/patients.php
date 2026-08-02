@@ -1,11 +1,4 @@
 <?php
-// ================================================================
-//  patients.php — Manajemen Data Pasien
-//  GET              → ambil semua daftar pasien
-//  GET ?id=5        → ambil data 1 pasien + riwayat pengukurannya
-//  POST             → tambah pasien baru
-//  PUT  ?id=5       → edit data pasien
-// ================================================================
 
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS");
@@ -19,7 +12,6 @@ require_once "config.php";
 $method = $_SERVER['REQUEST_METHOD'];
 $id     = isset($_GET['id']) ? intval($_GET['id']) : null;
 
-// ── GET daftar semua pasien ───────────────────────────────────────
 if ($method === 'GET' && !$id) {
     $result = $conn->query("
         SELECT
@@ -50,7 +42,6 @@ if ($method === 'GET' && !$id) {
     exit;
 }
 
-// ── GET satu pasien + riwayatnya ──────────────────────────────────
 if ($method === 'GET' && $id) {
     $stmt = $conn->prepare("SELECT id, nama, tanggal_lahir, no_rekam_medis, usia_kehamilan, nama_suami, no_telp, catatan, created_at FROM pasien WHERE id = ?");
     $stmt->bind_param("i", $id);
@@ -68,7 +59,6 @@ if ($method === 'GET' && $id) {
         exit;
     }
 
-    // Riwayat sesi pengukuran pasien ini
     $stmt2 = $conn->prepare("
         SELECT
             DATE(created_at)                    AS tanggal,
@@ -110,7 +100,6 @@ if ($method === 'GET' && $id) {
     exit;
 }
 
-// ── POST tambah pasien baru ───────────────────────────────────────
 if ($method === 'POST') {
     $body = json_decode(file_get_contents("php://input"), true);
 
@@ -123,7 +112,6 @@ if ($method === 'POST') {
         exit;
     }
 
-    // Validasi format tanggal
     if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $tgl_lhr)) {
         http_response_code(400);
         echo json_encode(["error" => "Format tanggal lahir: YYYY-MM-DD"]);
@@ -152,7 +140,6 @@ if ($method === 'POST') {
     exit;
 }
 
-// ── PUT edit data pasien ──────────────────────────────────────────
 if ($method === 'PUT' && $id) {
     $body = json_decode(file_get_contents("php://input"), true);
 

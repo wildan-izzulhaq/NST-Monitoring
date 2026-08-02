@@ -1,18 +1,4 @@
 <?php
-// ================================================================
-//  active_patient.php — Pasien Aktif yang Sedang Diperiksa
-//
-//  GET  → ambil patient_id yang sedang aktif
-//         Response: { "patient_id": 3, "nama": "Siti Rahayu" }
-//         atau null jika belum ada
-//
-//  POST → set pasien aktif (dipanggil website saat dokter klik pasien)
-//         Body JSON: { "patient_id": 3 }
-//         Response: { "status": "ok", "patient_id": 3 }
-//
-//  Digunakan oleh ESP32 untuk tahu patient_id tanpa hardcode.
-//  ESP32 fetch GET endpoint ini tiap sebelum kirim data.
-// ================================================================
 
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
@@ -24,7 +10,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(200); exit; }
 
 require_once "config.php";
 
-// Pastikan tabel nst_setting ada (auto-create jika belum)
 $conn->query("
     CREATE TABLE IF NOT EXISTS nst_setting (
         k   VARCHAR(50) PRIMARY KEY,
@@ -33,7 +18,6 @@ $conn->query("
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 ");
 
-// ── GET: ambil pasien aktif ───────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     $res = $conn->query("SELECT v FROM nst_setting WHERE k = 'active_patient_id'");
     $row = $res ? $res->fetch_assoc() : null;
@@ -64,7 +48,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     exit;
 }
 
-// ── POST: set pasien aktif ────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $body = json_decode(file_get_contents("php://input"), true);
     $pid  = intval($body['patient_id'] ?? 0);
@@ -76,7 +59,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // Verifikasi pasien ada di database
     $stmt = $conn->prepare("SELECT id, nama FROM pasien WHERE id = ?");
     $stmt->bind_param("i", $pid);
     $stmt->execute();
@@ -91,7 +73,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // Upsert (insert atau update jika sudah ada)
     $stmt2 = $conn->prepare("
         INSERT INTO nst_setting (k, v) VALUES ('active_patient_id', ?)
         ON DUPLICATE KEY UPDATE v = VALUES(v), updated_at = NOW()

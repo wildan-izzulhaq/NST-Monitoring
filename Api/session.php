@@ -1,28 +1,4 @@
 <?php
-// ================================================================
-//  session.php — Manajemen Sesi Recording NST
-//
-//  POST body JSON:
-//    { "action": "start",  "patient_id": 3 }  → mulai rekam
-//    { "action": "stop",   "patient_id": 3 }  → stop rekam
-//    { "action": "reset",  "patient_id": 3 }  → reset (stop + clear active)
-//
-//  GET → ambil status sesi aktif saat ini
-//    Response: {
-//      "recording": true/false,
-//      "session_id": 12,          // null jika tidak ada
-//      "patient_id": 3,
-//      "started_at": "2025-01-01 10:00:00"
-//    }
-//
-//  Logika:
-//  - START  : buat baris baru di nst_session, set status='recording'
-//             update nst_setting key='active_session_id'
-//  - STOP   : update nst_session set status='done', ended_at=NOW()
-//             hapus nst_setting key='active_session_id'
-//  - RESET  : sama seperti STOP (data tetap tersimpan di DB)
-//             + reset nst_setting active_patient_id jika perlu
-// ================================================================
 
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
@@ -34,7 +10,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(200); exit; }
 
 require_once "config.php";
 
-// ── Auto-create tabel nst_session ────────────────────────────────
 $conn->query("
     CREATE TABLE IF NOT EXISTS nst_session (
         id          INT AUTO_INCREMENT PRIMARY KEY,
@@ -48,7 +23,6 @@ $conn->query("
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 ");
 
-// Pastikan tabel nst_setting ada
 $conn->query("
     CREATE TABLE IF NOT EXISTS nst_setting (
         k   VARCHAR(50) PRIMARY KEY,
@@ -57,14 +31,12 @@ $conn->query("
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 ");
 
-// Tambah kolom session_id di nst_realtime jika belum ada
 $chk2 = $conn->query("SHOW COLUMNS FROM nst_realtime LIKE 'session_id'");
 if ($chk2 && $chk2->num_rows === 0) {
     $conn->query("ALTER TABLE nst_realtime ADD COLUMN session_id INT DEFAULT NULL");
     $conn->query("ALTER TABLE nst_realtime ADD INDEX idx_session (session_id)");
 }
 
-// ── Helper: ambil sesi aktif ──────────────────────────────────────
 function getActiveSession($conn) {
     $res = $conn->query("SELECT v FROM nst_setting WHERE k = 'active_session_id'");
     $row = $res ? $res->fetch_assoc() : null;
@@ -82,7 +54,6 @@ function getActiveSession($conn) {
         : null;
 }
 
-// ── GET: status sesi aktif ───────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     $sess = getActiveSession($conn);
     if ($sess) {
@@ -98,7 +69,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     exit;
 }
 
-// ── POST: aksi dari ESP32 ────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $body   = json_decode(file_get_contents("php://input"), true);
     $action = strtolower(trim($body['action'] ?? ''));
@@ -109,8 +79,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // Ambil patient_id: dari body jika ada, atau dari active_patient_id di DB
-    // Alat tidak perlu tahu patient_id — website yang set saat pilih pasien
     $pid = intval($body['patient_id'] ?? 0);
     if ($pid <= 0) {
         $res_p = $conn->query("SELECT v FROM nst_setting WHERE k='active_patient_id'");
@@ -118,9 +86,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pid   = ($row_p && $row_p['v']) ? intval($row_p['v']) : 0;
     }
 
-    // ── START ─────────────────────────────────────────────────────
     if ($action === 'start') {
-        // Jika sudah ada sesi recording, jangan buat lagi
         $existing = getActiveSession($conn);
         if ($existing) {
             echo json_encode([
@@ -131,13 +97,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
 
-        // Buat sesi baru
         $stmt = $conn->prepare("INSERT INTO nst_session (patient_id, status) VALUES (?, 'recording')");
         $stmt->bind_param("i", $pid);
         $stmt->execute();
         $newSid = $conn->insert_id;
 
-        // Simpan ke setting
         $sid_str = (string)$newSid;
         $stmt2 = $conn->prepare("
             INSERT INTO nst_setting (k, v) VALUES ('active_session_id', ?)
@@ -155,7 +119,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // ── STOP ──────────────────────────────────────────────────────
     if ($action === 'stop') {
         $existing = getActiveSession($conn);
         if (!$existing) {
@@ -175,15 +138,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // ── RESET ─────────────────────────────────────────────────────
     if ($action === 'reset') {
         $existing = getActiveSession($conn);
         if ($existing) {
             $sid = intval($existing['id']);
-            // Tandai sesi sebagai done (data tetap tersimpan)
             $conn->query("UPDATE nst_session SET status='done', ended_at=NOW() WHERE id=$sid");
         }
-        // Hapus sesi aktif dari setting
+        
         $conn->query("DELETE FROM nst_setting WHERE k='active_session_id'");
 
         echo json_encode([

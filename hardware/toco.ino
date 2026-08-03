@@ -12,16 +12,16 @@ const char* WIFI_SSID = "";
 const char* WIFI_PASS = "";
 
 // Konfigurasi Server
-const char* URL_DATA    = "https://non.stress.test.diagtem.xyz/api/data.php";
-const char* URL_SESSION = "https://non.stress.test.diagtem.xyz/api/session.php";
+const char* URL_DATA    = "";
+const char* URL_SESSION = "";
 
 // Konfigurasi MQTT
-const char* MQTT_HOST   = "60bade7c84b848c3b1ff035a19f5613f.s1.eu.hivemq.cloud";
-const int   MQTT_PORT   = 8883;
-const char* MQTT_USER   = "nonstresstest";
-const char* MQTT_PASS   = "Nonstresstest2026";
-const char* MQTT_CLIENT = "esp32_toco";
-const char* TOPIC_TOCO  = "nst/toco";
+const char* MQTT_HOST   = "";
+const int   MQTT_PORT   = ;
+const char* MQTT_USER   = "";
+const char* MQTT_PASS   = "";
+const char* MQTT_CLIENT = "";
+const char* TOPIC_TOCO  = "";
 
 WiFiClientSecure secureClient;
 PubSubClient     mqttClient(secureClient);

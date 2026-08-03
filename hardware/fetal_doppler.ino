@@ -9,15 +9,15 @@ const char* WIFI_SSID = "";
 const char* WIFI_PASS = "";
 
 // Konfigurasi Server
-const char* URL_DATA = "https://non.stress.test.diagtem.xyz/api/data.php";
+const char* URL_DATA = "";
 
 // Konfigurasi MQTT HiveMQ Cloud
 const char* MQTT_HOST   = "";
-const int   MQTT_PORT   = 8883;
+const int   MQTT_PORT   = ;
 const char* MQTT_USER   = "";
 const char* MQTT_PASS   = "";
-const char* MQTT_CLIENT = "esp32_fhr";
-const char* TOPIC_FHR   = "nst/fhr";
+const char* MQTT_CLIENT = "";
+const char* TOPIC_FHR   = "";
 
 // Objek MQTT
 WiFiClientSecure secureClientFHR;

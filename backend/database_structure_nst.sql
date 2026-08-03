@@ -1,11 +1,6 @@
 -- phpMyAdmin SQL Dump
 -- version 5.2.2
 -- https://www.phpmyadmin.net/
---
--- Host: localhost:3306
--- Waktu pembuatan: 02 Agu 2026 pada 16.48
--- Versi server: 8.0.46-cll-lve
--- Versi PHP: 8.4.23
 
 SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
 START TRANSACTION;
@@ -16,12 +11,6 @@ SET time_zone = "+00:00";
 /*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
 /*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
 /*!40101 SET NAMES utf8mb4 */;
-
---
--- Database: `diagtemx_nst`
---
-
--- --------------------------------------------------------
 
 --
 -- Struktur dari tabel `nst_bookmark`
@@ -125,9 +114,6 @@ CREATE TABLE `pasien` (
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
---
--- Indexes for dumped tables
---
 
 --
 -- Indeks untuk tabel `nst_bookmark`
